@@ -1,0 +1,37 @@
+{
+  "sensor_id": {
+    "S": "fieldF_mositure2"
+  },
+  "timestamp": {
+    "S": "1748835906209"
+  },
+  "moisture": {
+    "N": "71"
+  },
+  "npk": {
+    "M": {
+      "nitrogen": {
+        "S": "1.37"
+      },
+      "phosphorus": {
+        "S": "0.77"
+      },
+      "potassium": {
+        "S": "1.53"
+      }
+    }
+  },
+  "temperature": {
+    "S": "30.36"
+  },
+  "weather": {
+    "M": {
+      "forecast_temp": {
+        "N": "28"
+      },
+      "rain_last_24h": {
+        "N": "48"
+      }
+    }
+  }
+}

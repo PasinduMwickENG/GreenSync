@@ -1,0 +1,19 @@
+{
+  "cards": [
+    {
+      "id": 1,
+      "label": "Temperature",
+      "value": "30 °C"
+    },
+    {
+      "id": 2,
+      "label": "Humidity",
+      "value": "65 %"
+    },
+    {
+      "id": 3,
+      "label": "Nitrogen",
+      "value": "40 ppm"
+    }
+  ]
+}

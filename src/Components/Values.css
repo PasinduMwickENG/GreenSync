@@ -1,0 +1,40 @@
+*{
+font-family: sans-serif;
+}
+
+.values {
+  font-size: 20px;         
+  color: #00d076;            
+  font-weight: bold;
+  display: flex;              
+  justify-content: center; 
+  margin-top: 0px;
+  margin-left: 10px;
+}
+.readings {
+  
+  display:flex;
+  color:black;
+  font-size: 20px;
+  margin-top: 10px;
+  font-weight: bold;
+}
+.card {
+  background:#f8f9fa;
+  padding:25px;
+  border-radius: 20px;
+  max-height: 240px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+}
+.Title {
+  justify-content: center;
+  display:flex;
+  font-weight:bold;
+  margin-top:25px;
+  font-size: 30px;
+  font-weight: bold;
+  color:#4b4b4b;
+}
+.Weather {
+  border-radius: 20px;
+}

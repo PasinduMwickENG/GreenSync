@@ -1,0 +1,126 @@
+/* Import Inter font for a modern UI */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap');
+
+@import "tailwindcss";
+
+/* Base styles */
+:root {
+  --accent-600: #16a34a; /* green-600 */
+  --accent-500: #22c55e;
+  --muted-400: #94a3b8;
+  --card-shadow: 0 6px 18px rgba(14, 30, 37, 0.06);
+  --radius: 0.75rem;
+}
+
+body {
+  margin: 0;
+  background-color: #f8fafc; /* very light gray */
+  color: #0f172a; /* slate-900 */
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-font-feature-settings: "liga" on;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New", monospace;
+}
+
+/* Container utility for centered content */
+.app-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+/* Buttons and UI */
+.btn {
+  padding: .6rem 1rem;
+  border-radius: .6rem;
+  font-weight: 600;
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+.btn-primary {
+  background: linear-gradient(90deg, var(--accent-500), var(--accent-600));
+  color: white;
+  box-shadow: 0 6px 18px rgba(34,197,94,0.18);
+}
+.btn-primary:hover { transform: translateY(-2px); }
+
+.card {
+  background: white;
+  border-radius: var(--radius);
+  box-shadow: var(--card-shadow);
+  border: 1px solid rgba(15,23,42,0.04);
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+.card:hover { transform: translateY(-4px); box-shadow: 0 12px 30px rgba(14,30,37,0.08); }
+
+/* Small utility classes */
+.muted { color: var(--muted-400); }
+.rounded-lg { border-radius: var(--radius); }
+
+/* CSS variables for light theme */
+:root {
+  --background: #ffffff;
+  --foreground: #0a0a0a;
+  --card: #ffffff;
+  --card-foreground: #0a0a0a;
+  --popover: #ffffff;
+  --popover-foreground: #0a0a0a;
+  --primary: #181818;
+  --primary-foreground: #fafafa;
+  --secondary: #f5f5f5;
+  --secondary-foreground: #181818;
+  --muted: #f5f5f5;
+  --muted-foreground: #737373;
+  --accent: #f5f5f5;
+  --accent-foreground: #181818;
+  --destructive: #ef4444;
+  --destructive-foreground: #fafafa;
+  --border: #e5e5e5;
+  --input: #e5e5e5;
+  --ring: #0a0a0a;
+  --chart-1: #f2924d;
+  --chart-2: #2f9984;
+  --chart-3: #355b71;
+  --chart-4: #f2b84d;
+  --chart-5: #f57c2c;
+} 
+
+/* Dark theme overrides */
+.dark {
+  --background: #0a0a0a;
+  --foreground: #fafafa;
+  --card: #0a0a0a;
+  --card-foreground: #fafafa;
+  --popover: #0a0a0a;
+  --popover-foreground: #fafafa;
+  --primary: #fafafa;
+  --primary-foreground: #181818;
+  --secondary: #262626;
+  --secondary-foreground: #fafafa;
+  --muted: #262626;
+  --muted-foreground: #a3a3a3;
+  --accent: #262626;
+  --accent-foreground: #fafafa;
+  --destructive: #802222;
+  --destructive-foreground: #fafafa;
+  --border: #262626;
+  --input: #262626;
+  --ring: #d4d4d4;
+  --chart-1: #3b82f6;
+  --chart-2: #3cbba8;
+  --chart-3: #d48836;
+  --chart-4: #c084fc;
+  --chart-5: #f43f5e;
+}
+
+/* Apply border color to all elements */
+* {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto",
+    "Oxygen", "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans",
+    "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
