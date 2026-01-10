@@ -6,6 +6,9 @@ import ActuatorSystem from '../ActuatorSystem';
 import NotificationPanel from '../NotificationPanel';
 import CropInfo from '../CropInfo';
 import { toast, Toaster } from 'sonner';
+import { useAuthState } from 'react-firebase-hooks/auth';
+import { auth, rtdb } from '../../firebaseConfig';
+import { ref, onValue } from 'firebase/database';
 
 
 // ✅ Default threshold values for each sensor parameter
@@ -19,8 +22,11 @@ const defaultThresholds = {
 };
 
 function Module() {
-  const { id } = useParams(); // id = "1", "2", etc.
-  const moduleKey = `module${id}`; // e.g., "module1"
+  const { id } = useParams();
+  const [user] = useAuthState(auth);
+
+  // Backward-compatible: numeric routes map to old "module1" format.
+  const moduleId = /^\d+$/.test(String(id)) ? `module${id}` : String(id);
   const [sensorList, setSensorList] = useState([]);
   const [selectedSensorId, setSelectedSensorId] = useState('');
   const [sensorData, setSensorData] = useState([]);
@@ -29,25 +35,43 @@ function Module() {
   const [showPanel, setShowPanel] = useState(false);
   const [thresholds, setThresholds] = useState(defaultThresholds); // ✅ Initialize with defaults
 
+  const applyLatestNow = (latestReading) => {
+    const records = latestReading && typeof latestReading === 'object' ? [latestReading] : [];
+    setSensorData(records);
+    const sensorIds = records.length
+      ? [...new Set(records.map((e) => e.sensor_id || 'unknown_sensor'))]
+      : [];
+    setSensorList(sensorIds);
+    setSelectedSensorId((prev) => prev || sensorIds[0] || '');
+  };
+
   useEffect(() => {
-    const fetchData = async () => {
+    if (!user) return;
+
+    // Find module under user's farms and use latestReading/sensors
+    const farmsRef = ref(rtdb, `users/${user.uid}/farms`);
+    const unsub = onValue(farmsRef, (snap) => {
+      const farms = snap.val() || {};
+
+      let latestReading = null;
+      Object.values(farms).some((farm) => {
+        const mod = farm?.modules?.[moduleId];
+        if (!mod) return false;
+        latestReading = mod.latestReading || mod.sensors || null;
+        return true;
+      });
+
+      applyLatestNow(latestReading);
+    });
+
+    return () => {
       try {
-        const res = await fetch('https://8j84zathh0.execute-api.ap-south-1.amazonaws.com/sensor-data');
-        const data = await res.json();
-        const moduleData = data[moduleKey];
-        if (!moduleData) return;
-
-        setSensorData(moduleData);
-
-        const sensorIds = [...new Set(moduleData.map(entry => entry.sensor_id))];
-        setSensorList(sensorIds);
-        setSelectedSensorId(sensorIds[0]); // default to first sensor
-      } catch (err) {
-        console.error("Error fetching sensor data:", err);
+        unsub();
+      } catch {
+        // ignore
       }
     };
-    fetchData();
-  }, [moduleKey]);
+  }, [user, moduleId]);
 
   useEffect(() => {
     if (!sensorData.length || !selectedSensorId) return;
@@ -107,9 +131,9 @@ function Module() {
         toggle={() => setShowPanel(!showPanel)}
       />
 
-      <h1 className="Title">Crop Information - {moduleKey}</h1>
+      <h1 className="Title">Crop Information - {moduleId}</h1>
       <div className="flex justify-center mb-10 mt-10">
-        <div className="mr-10"><CropInfo moduleId={moduleKey} /></div>
+        <div className="mr-10"><CropInfo moduleId={moduleId} /></div>
       </div>
 
       <h1 className="Title mb-5">Sensor Data</h1>
@@ -165,7 +189,7 @@ function Module() {
                 <Card card={card} />
                 <Counter
                   title={card.reading}
-                  moduleId={moduleKey}
+                  moduleId={moduleId}
                   sensorType={card.sensorType}
                   initialThresholds={thresholds[card.sensorType]}
                   onThresholdChange={handleThresholdChange}

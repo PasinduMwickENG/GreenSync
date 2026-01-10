@@ -1,28 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import './Values.css';
 
-function ActuatorSystem({ moduleId = "moduleX" }) {
-  const [latestData, setLatestData] = useState(null);
+function ActuatorSystem({ data }) {
+  const latestData = data || null;
 
-  useEffect(() => {
-    fetch('https://8j84zathh0.execute-api.ap-south-1.amazonaws.com/sensor-data')
-      .then(res => res.json())
-      .then(json => {
-        const moduleData = json[moduleId];
-        if (!moduleData || moduleData.length === 0) {
-          console.warn("No data found for module:", moduleId);
-          return;
-        }
-
-        const latest = moduleData[moduleData.length - 1]; // Last reading
-        setLatestData(latest);
-      })
-      .catch(err => {
-        console.error("Failed to load sensor data:", err);
-      });
-  }, [moduleId]);
-
-  if (!latestData) return <p>Loading actuator data...</p>;
+  if (!latestData) return <p>Actuator data unavailable.</p>;
 
   return (
     <div className="ActuatorStatus space-y-6 flex justify-center gap-3">

@@ -9,7 +9,6 @@ import Analytics from '../Analytics';
 import Actuators from '../Actuators';
 import Alerts from '../Alerts';
 import Settings from '../Settings';
-import Dashboardz from '../Dashboardz';
 import PlotManager from '../PlotManager';
 import AddModuleDialog from '../Dialogs/AddModuleDialog';
 import AddPlotDialog from '../Dialogs/AddPlotDialog';
@@ -47,17 +46,45 @@ function Dashboard() {
 
     setConfigLoading(true);
 
+    // Fast path: restore cached plots so refresh doesn't block on network.
+    try {
+      const cached = localStorage.getItem(`dashboardPlots_${user.uid}`);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed && typeof parsed === 'object') {
+          setDashboardPlots(parsed);
+          // Don't block UI if we have something to show.
+          setConfigLoading(false);
+        }
+      }
+    } catch {
+      // ignore cache issues
+    }
+
+    // Safety net: don't block forever if config fetch is slow/offline.
+    const fallbackTimer = setTimeout(() => {
+      setConfigLoading(false);
+    }, 2500);
+
     // Subscribe to dashboard configuration
     const unsubscribe = dashboardConfig.subscribeToConfig(user.uid, (config, error) => {
       if (error) {
         console.error('Error loading dashboard config:', error);
+        clearTimeout(fallbackTimer);
         setConfigLoading(false);
         return;
       }
 
       if (config) {
-        setDashboardPlots(config.plots || {});
+        const nextPlots = config.plots || {};
+        setDashboardPlots(nextPlots);
+        try {
+          localStorage.setItem(`dashboardPlots_${user.uid}`, JSON.stringify(nextPlots));
+        } catch {
+          // ignore storage errors
+        }
       }
+      clearTimeout(fallbackTimer);
       setConfigLoading(false);
     });
 
@@ -79,7 +106,10 @@ function Dashboard() {
       setAvailableFarms(Object.values(farms));
     });
 
-    return () => unsubscribe();
+    return () => {
+      clearTimeout(fallbackTimer);
+      unsubscribe();
+    };
   }, [user]);
 
   const handleNavigateToSensors = (moduleId) => {
@@ -149,28 +179,18 @@ function Dashboard() {
               </div>
             </div>
 
-            {/* Module Grid - Uses Dashboardz without its header */}
-            <Dashboardz
-              hideHeader={true}
-              onModuleSelect={(m) => setSelectedModuleId(m.id)}
-              onNavigateToSensors={handleNavigateToSensors}
-              onAddGreenhouse={() => setShowAddModuleDialog(true)}
-            />
-
-            {/* Custom Plots Section - Only show if plots exist */}
-            {Object.keys(dashboardPlots).length > 0 && (
-              <div className="mt-8">
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="text-xl font-bold text-gray-900">Custom Comparison Plots</h3>
-                  <span className="text-sm text-gray-500">{Object.keys(dashboardPlots).length} plot{Object.keys(dashboardPlots).length !== 1 ? 's' : ''}</span>
-                </div>
-                <PlotManager
-                  userId={user.uid}
-                  plots={dashboardPlots}
-                  onPlotDeleted={handlePlotDeleted}
-                />
+            {/* Plots (primary dashboard content) */}
+            <div className="mt-2">
+              <div className="flex items-center justify-between mb-4 px-0 md:px-0">
+                <h3 className="text-xl font-bold text-gray-900">Plots</h3>
+                <span className="text-sm text-gray-500">{Object.keys(dashboardPlots).length} plot{Object.keys(dashboardPlots).length !== 1 ? 's' : ''}</span>
               </div>
-            )}
+              <PlotManager
+                userId={user.uid}
+                plots={dashboardPlots}
+                onPlotDeleted={handlePlotDeleted}
+              />
+            </div>
           </div>
         )}
 

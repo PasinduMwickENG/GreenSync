@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -21,10 +21,29 @@ import {
   CheckCircle
 } from 'lucide-react';
 import { mockSettings } from '../data/mock';
+import { useAuthState } from 'react-firebase-hooks/auth';
+import { auth } from '../firebaseConfig';
+import dashboardConfig from '../services/dashboardConfig';
+import { useSamplingIntervalMs } from '../hooks/useUserPreferences';
 
 const Settings = () => {
+  const [user] = useAuthState(auth);
+  const samplingIntervalMs = useSamplingIntervalMs(user?.uid);
+
   const [settings, setSettings] = useState(mockSettings);
   const [hasChanges, setHasChanges] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  // Load sampling interval from RTDB preferences into UI (minutes)
+  useEffect(() => {
+    const minutes = Math.max(1, Math.min(60, Math.round(Number(samplingIntervalMs) / 60000) || mockSettings.samplingInterval));
+    setSettings((prev) => ({
+      ...prev,
+      samplingInterval: minutes,
+    }));
+    // This is a load/refresh from DB; don't mark as user changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [samplingIntervalMs]);
 
   const handleSettingChange = (key, value) => {
     setSettings(prev => ({
@@ -34,11 +53,33 @@ const Settings = () => {
     setHasChanges(true);
   };
 
-  const saveSettings = () => {
-    // In a real app, this would save to backend
+  const saveSettings = async () => {
+    // Keep local storage for the mock-only settings,
+    // but persist sampling interval to Firebase RTDB so all components can use it.
     localStorage.setItem('agriDashSettings', JSON.stringify(settings));
-    setHasChanges(false);
-    alert('Settings saved successfully!');
+
+    if (!user) {
+      alert('Please sign in to save sampling interval to the database.');
+      return;
+    }
+
+    const samplingIntervalMinutes = Number(settings.samplingInterval);
+    const samplingMs = Math.max(1, Math.round(samplingIntervalMinutes)) * 60 * 1000;
+
+    try {
+      setSaving(true);
+      await dashboardConfig.updatePreferences(user.uid, {
+        samplingIntervalMs: samplingMs,
+        updatedAt: Date.now(),
+      });
+      setHasChanges(false);
+      alert('Settings saved successfully!');
+    } catch (e) {
+      console.error('Failed to save sampling interval to RTDB', e);
+      alert('Failed to save sampling interval. Please try again.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const resetSettings = () => {
@@ -64,9 +105,9 @@ const Settings = () => {
             <RotateCcw className="w-4 h-4 mr-2" />
             Reset
           </Button>
-          <Button onClick={saveSettings} size="sm" disabled={!hasChanges}>
+          <Button onClick={saveSettings} size="sm" disabled={!hasChanges || saving}>
             <Save className="w-4 h-4 mr-2" />
-            Save Settings
+            {saving ? 'Saving…' : 'Save Settings'}
           </Button>
         </div>
       </div>
@@ -357,9 +398,9 @@ const Settings = () => {
           <RotateCcw className="w-4 h-4 mr-2" />
           Reset to Defaults
         </Button>
-        <Button onClick={saveSettings} disabled={!hasChanges}>
+        <Button onClick={saveSettings} disabled={!hasChanges || saving}>
           <Save className="w-4 h-4 mr-2" />
-          Save All Settings
+          {saving ? 'Saving…' : 'Save All Settings'}
         </Button>
       </div>
     </div>

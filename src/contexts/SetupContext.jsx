@@ -30,7 +30,8 @@ export const SetupProvider = ({ children }) => {
             return;
         }
 
-        setCheckingSetup(true);
+        // Optimistic: if we have a cached setup status, don't block the UI on network.
+        let hadCached = false;
         setPermissionDenied(false);
 
         // ---------- FAST CACHE READ ----------
@@ -39,11 +40,16 @@ export const SetupProvider = ({ children }) => {
             if (raw !== null) {
                 console.log("SetupContext: Found cached setup status:", raw);
                 setSetupCompleted(JSON.parse(raw));
-                // If we found a cached value, we can stop blocking the UI immediately
-                // while we verify in the background (optional optimization)
+                hadCached = true;
+                // Stop blocking UI immediately; still verify in background.
+                setCheckingSetup(false);
             }
         } catch (e) {
             console.warn("localStorage read failed", e);
+        }
+
+        if (!hadCached) {
+            setCheckingSetup(true);
         }
 
         let unsub = () => { };

@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
-import { Button } from "./ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import { auth, rtdb } from "../firebaseConfig";
+import { ref, onValue, get, query, limitToLast } from "firebase/database";
+import { useAuthState } from "react-firebase-hooks/auth";
+import { ChevronLeft, ChevronRight } from "lucide-react";
+import { LoadingSpinner } from "./ui/loading-spinner";
 import Chart from "react-apexcharts";
 import "./Loader.css";
 
@@ -32,12 +35,45 @@ const scaleNPKValue = (value, metric) => {
   return value;
 };
 
-const parseTimestampToMs = (ts) => {
+const parseTimestampToMs = (ts, nowMs = Date.now()) => {
   if (ts == null) return null;
   const n = Number(ts);
   if (!isFinite(n)) return null;
-  if (n < 1e11) return Math.round(n * 1000);
-  return Math.round(n);
+
+  const MOD_32_MS = 4294967296; // 2^32 ms ~= 49.71 days
+
+  const candidates = [];
+
+  // Interpretations by magnitude
+  if (n > 1e17) candidates.push(Math.round(n / 1e6)); // ns -> ms
+  if (n > 1e14) candidates.push(Math.round(n / 1e3)); // µs -> ms
+
+  // Ambiguous range: could be seconds OR 32-bit-overflowed ms
+  candidates.push(Math.round(n)); // ms
+  candidates.push(Math.round(n * 1000)); // seconds -> ms
+
+  // ESP32 pitfall: `unsigned long timestamp = time()*1000` overflows 32-bit.
+  // When we see a 32-bit-ish value, "unwrap" it to the closest time near now.
+  if (n >= 0 && n <= 0xFFFFFFFF) {
+    const low = Math.round(n);
+    const k = Math.round((nowMs - low) / MOD_32_MS);
+    candidates.push(low + k * MOD_32_MS);
+    candidates.push(low + (k - 1) * MOD_32_MS);
+    candidates.push(low + (k + 1) * MOD_32_MS);
+  }
+
+  // Pick the candidate closest to now (reasonableness handled upstream).
+  let best = null;
+  let bestDelta = Infinity;
+  for (const ms of candidates) {
+    if (!isFinite(ms)) continue;
+    const d = Math.abs(ms - nowMs);
+    if (d < bestDelta) {
+      bestDelta = d;
+      best = ms;
+    }
+  }
+  return best;
 };
 
 const parseLocalDateTimeToMs = (local_date, local_time) => {
@@ -63,6 +99,12 @@ const formatDateTime = (ms) => {
   return new Date(ms).toLocaleString();
 };
 
+const startOfDayMs = (ms) => {
+  if (ms == null) return null;
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+};
+
 const getMetricUnit = (metric) => {
   switch (metric) {
     case "temperature": return "°C";
@@ -84,152 +126,395 @@ const getMetricColor = (metric) => {
   }
 };
 
-/* --- Component --- */
-const Analytics = () => {
-  const [modules, setModules] = useState([]);
-  const [selectedModule, setSelectedModule] = useState(null);
-  const [selectedSensor, setSelectedSensor] = useState("all");
-  const [selectedMetric, setSelectedMetric] = useState("temperature");
-  const [loading, setLoading] = useState(false);
-  const [lastReceivedMs, setLastReceivedMs] = useState(null);
-  const [manualDate, setManualDate] = useState(null);
+const HISTORY_CHILDREN = [
+  "history",
+  "readings",
+  "records",
+  "logs",
+  "sensorReadings",
+  "sensorHistory",
+  "measurements",
+  "data",
+];
 
-  const debounceRef = useRef(null);
+const normalizeRecordsFromUnknownShape = (val) => {
+  if (val == null) return [];
 
-  const obtainRecordMs = (record) => {
-    if (!record) return null;
-    const candidates = ["timestamp", "ts", "time"];
-    for (const k of candidates) {
-      if (k in record) {
-        const ms = parseTimestampToMs(record[k]);
-        if (ms !== null) return ms;
-      }
-    }
-    if (record.local_date && record.local_time) {
-      const ms = parseLocalDateTimeToMs(record.local_date, record.local_time);
-      if (ms !== null) return ms;
-    }
-    return null;
-  };
+  // Array of records
+  if (Array.isArray(val)) {
+    return val
+      .map((v, idx) => (v && typeof v === "object" ? { __key: v.__key ?? String(idx), ...v } : null))
+      .filter(Boolean);
+  }
 
-  const fetchSensorData = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch("https://8j84zathh0.execute-api.ap-south-1.amazonaws.com/sensor-data");
-      if (!res.ok) throw new Error(`API Error: ${res.status}`);
-      const data = await res.json();
+  // Object map of records OR single record
+  if (typeof val === "object") {
+    const keys = Object.keys(val);
+    if (!keys.length) return [];
 
-      let maxMs = null;
-      Object.values(data).forEach((sensorsArray) => {
-        sensorsArray.forEach((rec) => {
-          const ms = obtainRecordMs(rec);
-          if (ms !== null && (maxMs === null || ms > maxMs)) maxMs = ms;
-        });
-      });
+    const looksLikeSingleRecord = keys.some((k) =>
+      [
+        "timestamp",
+        "ts",
+        "time",
+        "sensor_id",
+        "temperature",
+        "humidity",
+        "soilMoisture",
+        "moisture",
+        "ph",
+        "pH",
+        "nitrogen",
+        "phosphorus",
+        "potassium",
+      ].includes(k)
+    );
 
-      const parsedModules = Object.entries(data).map(([moduleId, sensorsArray]) => {
-        const sensorModulesMap = {};
-        sensorsArray.forEach((sensor) => {
-          const sid = sensor.sensor_id || "unknown_sensor";
-          if (!sensorModulesMap[sid]) {
-            sensorModulesMap[sid] = { id: sid, name: sid, sensors: {}, apiData: [] };
-          }
-          const sm = sensorModulesMap[sid];
-          sm.apiData.push(sensor);
-          Object.entries(metricToApiKey).forEach(([metric, apiKey]) => {
-            const raw = sensor[apiKey];
-            const num = raw == null || raw === "" ? NaN : Number(raw);
-            if (isFinite(num)) {
-              // Apply scaling for NPK values
-              const scaledValue = scaleNPKValue(num, metric);
-              sm.sensors[metric] = { value: scaledValue };
-            }
-          });
-        });
-        Object.values(sensorModulesMap).forEach((sm) => {
-          sm.apiData.sort((a, b) => (obtainRecordMs(a) ?? 0) - (obtainRecordMs(b) ?? 0));
-        });
-        return {
-          id: moduleId,
-          name: moduleId.replace(/_/g, " ").toUpperCase(),
-          sensorModules: Object.values(sensorModulesMap),
-        };
-      });
-
-      setModules(parsedModules);
-      setLastReceivedMs(maxMs ?? Date.now());
-    } catch (err) {
-      console.error("fetchSensorData error:", err);
-      setLastReceivedMs(Date.now());
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchSensorData();
-    const interval = setInterval(fetchSensorData, 600000);
-    return () => clearInterval(interval);
-  }, []);
-
-  useEffect(() => {
-    if (!selectedModule && modules.length > 0) {
-      setSelectedModule(modules[0].id);
-      setSelectedSensor("all");
-    }
-  }, [modules, selectedModule]);
-
-  const availableSensors = useMemo(() => {
-    const m = modules.find((x) => x.id === selectedModule);
-    return m ? m.sensorModules.map((sm) => sm.id) : [];
-  }, [modules, selectedModule]);
-
-  const displayDate = useMemo(() => {
-    if (manualDate) return manualDate;
-    if (!lastReceivedMs) return new Date();
-    return new Date(lastReceivedMs);
-  }, [manualDate, lastReceivedMs]);
-
-  const trendData = useMemo(() => {
-    if (!selectedModule) return [];
-    const moduleData = modules.find((m) => m.id === selectedModule);
-    if (!moduleData) return [];
-    const apiKey = metricToApiKey[selectedMetric];
-    if (!apiKey) return [];
-
-    const startMs = new Date(displayDate.getFullYear(), displayDate.getMonth(), displayDate.getDate()).getTime();
-    const endMs = new Date(displayDate.getFullYear(), displayDate.getMonth(), displayDate.getDate(), 23, 59, 59, 999).getTime();
-
-    const points = [];
-
-    moduleData.sensorModules.forEach((sm) => {
-      if (selectedSensor !== "all" && sm.id !== selectedSensor) return;
-      sm.apiData.forEach((r) => {
-        const ts = obtainRecordMs(r);
-        if (!ts || ts < startMs || ts > endMs) return;
-        const val = r[apiKey] == null || r[apiKey] === "" ? NaN : Number(r[apiKey]);
-        if (isFinite(val)) {
-          // Apply scaling for NPK values in trend data
-          const scaledVal = scaleNPKValue(val, selectedMetric);
-          points.push({ x: ts, y: scaledVal });
-        }
-      });
+    const valuesAreObjects = keys.every((k) => {
+      const v = val[k];
+      return v && typeof v === "object" && !Array.isArray(v);
     });
 
-    // If averaging all sensors
+    if (valuesAreObjects && !looksLikeSingleRecord) {
+      return Object.entries(val)
+        .map(([k, v]) => (v && typeof v === "object" ? { __key: k, ...v } : null))
+        .filter(Boolean);
+    }
+
+    return [{ __key: val.__key ?? "record", ...val }];
+  }
+
+  return [];
+};
+
+/* --- Component --- */
+const obtainRecordMs = (rec) => {
+  if (!rec) return null;
+
+  const nowMs = Date.now();
+  const minReasonable = nowMs - 1000 * 60 * 60 * 24 * 365 * 5; // 5y ago
+  const maxReasonable = nowMs + 1000 * 60 * 60 * 24 * 2; // +2 days
+
+  const isReasonable = (ms) =>
+    typeof ms === "number" && isFinite(ms) && ms >= minReasonable && ms <= maxReasonable;
+
+  const score = (ms) => {
+    if (!isFinite(ms)) return Infinity;
+    // Strongly penalize unreasonable values; otherwise prefer closest to now.
+    const unreasonablePenalty = isReasonable(ms) ? 0 : 1e18;
+    return unreasonablePenalty + Math.abs(ms - nowMs);
+  };
+
+  const rawCandidates = [
+    rec.timestamp,
+    rec.ts,
+    rec.time,
+    rec.createdAt,
+    rec.created_at,
+    rec.dateTime,
+    rec.datetime,
+    rec.recordedAt,
+    rec.__key,
+  ];
+
+  // Prefer local_date/local_time if it parses reasonably.
+  if (rec.local_date && rec.local_time) {
+    const s = `${rec.local_date}T${rec.local_time}`;
+    const ms = Date.parse(s);
+    if (isReasonable(ms)) return ms;
+  }
+
+  let bestMs = null;
+  let bestScore = Infinity;
+  for (const c of rawCandidates) {
+    const ms = parseTimestampToMs(c, nowMs);
+    if (ms == null) continue;
+    const sc = score(ms);
+    if (sc < bestScore) {
+      bestScore = sc;
+      bestMs = ms;
+    }
+  }
+
+  return isReasonable(bestMs) ? bestMs : null;
+};
+
+const Analytics = () => {
+  const [user] = useAuthState(auth);
+
+  const [userPlots, setUserPlots] = useState({});
+  const [moduleIndex, setModuleIndex] = useState({});
+
+  const [selectedPlotId, setSelectedPlotId] = useState("");
+  const [selectedModuleId, setSelectedModuleId] = useState("");
+  const [selectedSensor, setSelectedSensor] = useState("all");
+  const [selectedMetric, setSelectedMetric] = useState("temperature");
+
+  const [historyByModule, setHistoryByModule] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [lastReceivedMs, setLastReceivedMs] = useState(null);
+  const [refreshToken, setRefreshToken] = useState(0);
+  const activeFetchRef = useRef(0);
+
+  const [dayCursorMs, setDayCursorMs] = useState(null);
+
+  const [savedZoom, setSavedZoom] = useState(null);
+
+  const loadModuleHistory = async (uid, farmId, moduleId) => {
+    const basePath = `users/${uid}/farms/${farmId}/modules/${moduleId}`;
+
+    // Try common history children first (bounded)
+    for (const childKey of HISTORY_CHILDREN) {
+      const snap = await get(query(ref(rtdb, `${basePath}/${childKey}`), limitToLast(1000)));
+      if (!snap.exists()) continue;
+      const records = normalizeRecordsFromUnknownShape(snap.val());
+      if (records.length) return records;
+    }
+
+    // Fallback: latest snapshot only (not true history)
+    const moduleSnap = await get(ref(rtdb, basePath));
+    const moduleData = moduleSnap.val() || {};
+    const latest = moduleData.latestReading || moduleData.sensors || null;
+    return latest && typeof latest === "object" ? [latest] : [];
+  };
+
+  // Subscribe to plots
+  useEffect(() => {
+    if (!user) return;
+    const plotsRef = ref(rtdb, `users/${user.uid}/dashboardConfig/plots`);
+    const unsub = onValue(plotsRef, (snap) => {
+      setUserPlots(snap.val() || {});
+    });
+    return () => unsub();
+  }, [user]);
+
+  // Subscribe to farms to build moduleId -> farmId index
+  useEffect(() => {
+    if (!user) return;
+    const farmsRef = ref(rtdb, `users/${user.uid}/farms`);
+    const unsub = onValue(farmsRef, (snap) => {
+      const farms = snap.val() || {};
+      const idx = {};
+      Object.entries(farms).forEach(([farmId, farm]) => {
+        const mods = farm?.modules || {};
+        Object.keys(mods).forEach((mid) => {
+          idx[mid] = { farmId };
+        });
+      });
+      setModuleIndex(idx);
+    });
+    return () => unsub();
+  }, [user]);
+
+  const plotsArray = useMemo(
+    () => Object.entries(userPlots || {}).map(([id, plot]) => ({ ...plot, id })),
+    [userPlots]
+  );
+
+  // Default plot selection
+  useEffect(() => {
+    if (!plotsArray.length) {
+      setSelectedPlotId("");
+      setSelectedModuleId("");
+      return;
+    }
+    if (!selectedPlotId || !userPlots[selectedPlotId]) {
+      setSelectedPlotId(plotsArray[0].id);
+    }
+  }, [plotsArray, selectedPlotId, userPlots]);
+
+  const selectedPlot = selectedPlotId ? userPlots[selectedPlotId] : null;
+  const plotModuleIds = useMemo(() => {
+    const ids = Array.isArray(selectedPlot?.modules) ? selectedPlot.modules : [];
+    return ids;
+  }, [selectedPlot]);
+
+  // Default module selection (first module in plot)
+  useEffect(() => {
+    if (!plotModuleIds.length) {
+      setSelectedModuleId("");
+      return;
+    }
+    if (!selectedModuleId || !plotModuleIds.includes(selectedModuleId)) {
+      setSelectedModuleId(plotModuleIds[0]);
+      setSelectedSensor("all");
+      return;
+    }
+  }, [plotModuleIds, selectedModuleId]);
+
+  const cycleModule = (direction) => {
+    if (!plotModuleIds.length) return;
+    const current = selectedModuleId && plotModuleIds.includes(selectedModuleId) ? selectedModuleId : plotModuleIds[0];
+    const idx = plotModuleIds.indexOf(current);
+    const nextIdx = (idx + direction + plotModuleIds.length) % plotModuleIds.length;
+    setSelectedModuleId(plotModuleIds[nextIdx]);
+    setSelectedSensor("all");
+  };
+
+  useEffect(() => {
+    const run = async () => {
+      if (!user || !selectedModuleId) return;
+      const farmId = moduleIndex?.[selectedModuleId]?.farmId;
+      if (!farmId) return;
+
+      const fetchId = ++activeFetchRef.current;
+      setLoading(true);
+
+      try {
+        const records = await loadModuleHistory(user.uid, farmId, selectedModuleId);
+        if (activeFetchRef.current !== fetchId) return;
+
+        records.sort((a, b) => (obtainRecordMs(a) ?? 0) - (obtainRecordMs(b) ?? 0));
+
+        const sensors = new Set();
+        let maxMs = null;
+        records.forEach((r) => {
+          sensors.add(r?.sensor_id || "unknown_sensor");
+          const ms = obtainRecordMs(r);
+          if (ms !== null && (maxMs === null || ms > maxMs)) maxMs = ms;
+        });
+
+        setHistoryByModule((prev) => ({
+          ...prev,
+          [selectedModuleId]: {
+            records,
+            sensorIds: Array.from(sensors),
+            lastReceivedMs: maxMs,
+          },
+        }));
+
+        setLastReceivedMs(maxMs);
+
+        // Default to latest day with data for this module
+        if (dayCursorMs == null && maxMs != null) {
+          setDayCursorMs(startOfDayMs(maxMs));
+        }
+      } catch (e) {
+        console.error("Failed to load module history from RTDB", e);
+      } finally {
+        if (activeFetchRef.current === fetchId) setLoading(false);
+      }
+    };
+
+    run();
+  }, [user, selectedModuleId, moduleIndex, refreshToken, dayCursorMs]);
+
+  // When module changes, reset day cursor so it snaps to the module's latest day
+  useEffect(() => {
+    setDayCursorMs(null);
+  }, [selectedModuleId]);
+
+  const displayDayStartMs = useMemo(() => {
+    if (dayCursorMs != null) return dayCursorMs;
+    const m = historyByModule?.[selectedModuleId]?.lastReceivedMs;
+    return m != null ? startOfDayMs(m) : null;
+  }, [dayCursorMs, historyByModule, selectedModuleId]);
+
+  const displayDayEndMs = useMemo(() => {
+    if (displayDayStartMs == null) return null;
+    return displayDayStartMs + 24 * 60 * 60 * 1000 - 1;
+  }, [displayDayStartMs]);
+
+  const cycleDay = (direction) => {
+    const base = displayDayStartMs;
+    if (base == null) return;
+    setDayCursorMs(base + direction * 24 * 60 * 60 * 1000);
+  };
+
+  const zoomStorageKey = useMemo(() => {
+    const uid = user?.uid || "anon";
+    const dayKey = displayDayStartMs != null ? String(displayDayStartMs) : "noday";
+    return `analyticsZoom:${uid}:${selectedPlotId || "noplot"}:${selectedModuleId || "nomodule"}:${selectedMetric || "nom"}:${selectedSensor || "nos"}:${dayKey}`;
+  }, [user?.uid, selectedPlotId, selectedModuleId, selectedMetric, selectedSensor, displayDayStartMs]);
+
+  // Load persisted zoom for the current context
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(zoomStorageKey);
+      if (!raw) {
+        setSavedZoom(null);
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      const xMin = parsed?.xMin != null ? Number(parsed.xMin) : null;
+      const xMax = parsed?.xMax != null ? Number(parsed.xMax) : null;
+      const yMin = parsed?.yMin != null ? Number(parsed.yMin) : null;
+      const yMax = parsed?.yMax != null ? Number(parsed.yMax) : null;
+
+      if (!isFinite(xMin) || !isFinite(xMax) || xMin >= xMax) {
+        setSavedZoom(null);
+        return;
+      }
+
+      // Clamp to current display day bounds when available
+      const clampedXMin = displayDayStartMs != null ? Math.max(xMin, displayDayStartMs) : xMin;
+      const clampedXMax = displayDayEndMs != null ? Math.min(xMax, displayDayEndMs) : xMax;
+
+      if (!isFinite(clampedXMin) || !isFinite(clampedXMax) || clampedXMin >= clampedXMax) {
+        setSavedZoom(null);
+        return;
+      }
+
+      setSavedZoom({
+        xMin: clampedXMin,
+        xMax: clampedXMax,
+        yMin: isFinite(yMin) ? yMin : null,
+        yMax: isFinite(yMax) ? yMax : null,
+      });
+    } catch {
+      setSavedZoom(null);
+    }
+  }, [zoomStorageKey, displayDayStartMs, displayDayEndMs]);
+
+  const availableSensors = useMemo(() => {
+    if (!selectedModuleId) return [];
+    return historyByModule?.[selectedModuleId]?.sensorIds || [];
+  }, [historyByModule, selectedModuleId]);
+
+  const trendData = useMemo(() => {
+    if (!selectedModuleId) return [];
+    const moduleHistory = historyByModule?.[selectedModuleId];
+    if (!moduleHistory) return [];
+    const apiKey = metricToApiKey[selectedMetric];
+    if (!apiKey) return [];
+    const points = [];
+    (moduleHistory.records || []).forEach((r) => {
+      const sid = r?.sensor_id || "unknown_sensor";
+      if (selectedSensor !== "all" && sid !== selectedSensor) return;
+      const ts = obtainRecordMs(r);
+      if (!ts) return;
+      if (displayDayStartMs != null && displayDayEndMs != null) {
+        if (ts < displayDayStartMs || ts > displayDayEndMs) return;
+      }
+      const val = r[apiKey] == null || r[apiKey] === "" ? NaN : Number(r[apiKey]);
+      if (!isFinite(val)) return;
+      points.push({ x: ts, y: scaleNPKValue(val, selectedMetric) });
+    });
+
     if (selectedSensor === "all") {
       const grouped = {};
       points.forEach((p) => {
         if (!grouped[p.x]) grouped[p.x] = [];
         grouped[p.x].push(p.y);
       });
-      return Object.entries(grouped).map(([ts, arr]) => ({ x: Number(ts), y: arr.reduce((a, b) => a + b, 0) / arr.length }));
+      return Object.entries(grouped)
+        .map(([ts, arr]) => ({ x: Number(ts), y: arr.reduce((a, b) => a + b, 0) / arr.length }))
+        .sort((a, b) => a.x - b.x);
     }
 
     return points.sort((a, b) => a.x - b.x);
-  }, [modules, selectedModule, selectedSensor, selectedMetric, displayDate]);
+  }, [historyByModule, selectedModuleId, selectedSensor, selectedMetric, displayDayStartMs, displayDayEndMs]);
 
-  const selectedModuleData = modules.find((m) => m.id === selectedModule) || modules[0];
+  const recordCount = useMemo(() => {
+    if (!selectedModuleId) return 0;
+    return historyByModule?.[selectedModuleId]?.records?.length || 0;
+  }, [historyByModule, selectedModuleId]);
+
+  const hasAnyHistoryForSelected = recordCount > 0;
+
+  const hasTrendPoints = trendData.length > 0;
+
+  const selectedPlotName = selectedPlot?.name || (selectedPlotId || "—");
 
   const chartOptions = {
     chart: {
@@ -238,13 +523,56 @@ const Analytics = () => {
       zoom: { enabled: true },
       toolbar: { show: true },
       animations: { enabled: false },
+      events: {
+        zoomed: (_chartCtx, { xaxis, yaxis }) => {
+          const xMin = xaxis?.min;
+          const xMax = xaxis?.max;
+          if (xMin == null || xMax == null || !isFinite(xMin) || !isFinite(xMax) || xMin >= xMax) return;
+
+          const next = {
+            xMin,
+            xMax,
+            yMin: isFinite(yaxis?.min) ? yaxis.min : null,
+            yMax: isFinite(yaxis?.max) ? yaxis.max : null,
+          };
+
+          setSavedZoom(next);
+          try {
+            localStorage.setItem(zoomStorageKey, JSON.stringify(next));
+          } catch {
+            // ignore storage errors
+          }
+        },
+        beforeResetZoom: () => {
+          setSavedZoom(null);
+          try {
+            localStorage.removeItem(zoomStorageKey);
+          } catch {
+            // ignore storage errors
+          }
+
+          // Return day bounds so reset stays within the day view.
+          return {
+            xaxis: {
+              min: displayDayStartMs ?? undefined,
+              max: displayDayEndMs ?? undefined,
+            },
+          };
+        },
+      },
     },
     xaxis: {
       type: "datetime",
+      min: savedZoom?.xMin ?? (displayDayStartMs ?? undefined),
+      max: savedZoom?.xMax ?? (displayDayEndMs ?? undefined),
       labels: { datetimeUTC: false, rotate: -45 },
       tooltip: { enabled: false },
     },
-    yaxis: { labels: { formatter: (val) => `${val}${getMetricUnit(selectedMetric)}` } },
+    yaxis: {
+      min: savedZoom?.yMin ?? undefined,
+      max: savedZoom?.yMax ?? undefined,
+      labels: { formatter: (val) => `${val}${getMetricUnit(selectedMetric)}` },
+    },
     stroke: { curve: "smooth", width: 2 },
     markers: { size: 4 },
     tooltip: { x: { format: "dd MMM yyyy HH:mm" } },
@@ -273,7 +601,7 @@ const Analytics = () => {
             <div className="font-semibold text-gray-700">{lastReceivedMs ? formatDateTime(lastReceivedMs) : "—"}</div>
           </div>
           <button 
-            onClick={fetchSensorData}
+            onClick={() => setRefreshToken((x) => x + 1)}
             className="px-4 py-2 bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white font-semibold text-sm rounded-full shadow-md transition-all duration-150 active:scale-95"
           >
             {loading ? "Refreshing..." : "Refresh"}
@@ -285,22 +613,52 @@ const Analytics = () => {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
           <div className="relative">
-            <Select value={selectedModuleData?.id || ""} onValueChange={(val) => { setSelectedModule(val); setSelectedSensor("all"); }}>
-              <SelectTrigger className="w-full sm:w-48 bg-white border-0 shadow-md rounded-2xl px-4 py-3 text-gray-900 font-medium focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50">
-                <SelectValue placeholder="Select module" />
+            <Select value={selectedPlotId} onValueChange={(val) => { setSelectedPlotId(val); setSelectedSensor("all"); }}>
+              <SelectTrigger className="w-full sm:w-60 bg-white border-0 shadow-md rounded-2xl px-4 py-3 text-gray-900 font-medium focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50">
+                <SelectValue placeholder="Select plot" />
               </SelectTrigger>
               <SelectContent className="bg-white border-0 shadow-2xl rounded-2xl overflow-hidden backdrop-blur-xl">
-                {modules.map((module) => (
+                {plotsArray.map((plot) => (
                   <SelectItem 
-                    key={module.id} 
-                    value={module.id}
+                    key={plot.id}
+                    value={plot.id}
                     className="px-4 py-3 hover:bg-blue-50 focus:bg-blue-50 text-gray-900 font-medium transition-colors"
                   >
-                    {module.name}
+                    {plot.name || plot.id}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
+          </div>
+
+          <div className="flex items-center gap-2 bg-white border-0 shadow-md rounded-2xl px-3 py-2">
+            <button
+              onClick={() => cycleModule(-1)}
+              disabled={!plotModuleIds.length}
+              className="w-9 h-9 flex items-center justify-center bg-gray-100 hover:bg-gray-200 active:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed rounded-full transition-all duration-150 active:scale-95"
+              aria-label="Previous module"
+            >
+              <ChevronLeft className="w-4 h-4 text-gray-700" />
+            </button>
+            <div className="min-w-0 px-1">
+              <div className="text-xs text-gray-500 font-medium">Module</div>
+              <div className="text-sm font-bold text-gray-900 truncate" title={selectedModuleId || ""}>
+                {selectedModuleId || "—"}
+              </div>
+              {selectedModuleId ? (
+                <div className="text-[11px] text-gray-500">
+                  {moduleIndex?.[selectedModuleId]?.farmId ? `${recordCount} records` : "Not found in farms"}
+                </div>
+              ) : null}
+            </div>
+            <button
+              onClick={() => cycleModule(1)}
+              disabled={!plotModuleIds.length}
+              className="w-9 h-9 flex items-center justify-center bg-gray-100 hover:bg-gray-200 active:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed rounded-full transition-all duration-150 active:scale-95"
+              aria-label="Next module"
+            >
+              <ChevronRight className="w-4 h-4 text-gray-700" />
+            </button>
           </div>
 
           <div className="relative">
@@ -355,44 +713,43 @@ const Analytics = () => {
         </div>
       </div>
 
-      {/* Date Navigation */}
-      <div className="mt-4 flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4">
+      {/* Day Navigation */}
+      <div className="flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4">
         <div className="flex items-center gap-3 bg-white p-3 rounded-3xl shadow-lg">
           <button
-            onClick={() =>
-              setManualDate(prev =>
-                prev ? new Date(prev.getTime() - 86400000) : new Date(displayDate.getTime() - 86400000)
-              )
-            }
-            className="w-10 h-10 flex items-center justify-center bg-gray-100 hover:bg-gray-200 active:bg-gray-300 rounded-full transition-all duration-150 active:scale-95 shadow-sm"
+            onClick={() => cycleDay(-1)}
+            disabled={displayDayStartMs == null}
+            className="w-10 h-10 flex items-center justify-center bg-gray-100 hover:bg-gray-200 active:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed rounded-full transition-all duration-150 active:scale-95 shadow-sm"
+            aria-label="Previous day"
           >
             <span className="text-gray-600 text-lg font-bold">◀</span>
           </button>
 
           <div className="px-4 py-2 bg-blue-50 rounded-2xl shadow-inner">
             <span className="font-bold text-blue-600 text-sm sm:text-base">
-              {displayDate.toLocaleDateString("en-GB", {
-                day: "2-digit",
-                month: "short",
-                year: "numeric",
-              }).toUpperCase()}
+              {displayDayStartMs
+                ? new Date(displayDayStartMs).toLocaleDateString("en-GB", {
+                    day: "2-digit",
+                    month: "short",
+                    year: "numeric",
+                  }).toUpperCase()
+                : "—"}
             </span>
           </div>
 
           <button
-            onClick={() =>
-              setManualDate(prev =>
-                prev ? new Date(prev.getTime() + 86400000) : new Date(displayDate.getTime() + 86400000)
-              )
-            }
-            className="w-10 h-10 flex items-center justify-center bg-gray-100 hover:bg-gray-200 active:bg-gray-300 rounded-full transition-all duration-150 active:scale-95 shadow-sm"
+            onClick={() => cycleDay(1)}
+            disabled={displayDayStartMs == null}
+            className="w-10 h-10 flex items-center justify-center bg-gray-100 hover:bg-gray-200 active:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed rounded-full transition-all duration-150 active:scale-95 shadow-sm"
+            aria-label="Next day"
           >
             <span className="text-gray-600 text-lg font-bold">▶</span>
           </button>
 
           <button
-            onClick={() => setManualDate(null)}
-            className="ml-2 px-4 py-2 text-sm font-semibold text-blue-500 hover:text-blue-600 active:text-blue-700 hover:bg-blue-50 active:bg-blue-100 rounded-full transition-all duration-150 active:scale-95"
+            onClick={() => setDayCursorMs(null)}
+            disabled={!historyByModule?.[selectedModuleId]?.lastReceivedMs}
+            className="ml-2 px-4 py-2 text-sm font-semibold text-blue-500 hover:text-blue-600 active:text-blue-700 hover:bg-blue-50 active:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed rounded-full transition-all duration-150 active:scale-95"
           >
             Latest
           </button>
@@ -403,14 +760,38 @@ const Analytics = () => {
       <div className="bg-white rounded-3xl shadow-lg overflow-hidden">
         <div className="p-6 pb-4">
           <h3 className="text-lg font-bold text-gray-900">
-            {selectedMetric} Trend - {selectedModuleData?.name} {selectedSensor !== "all" ? `• ${selectedSensor}` : "(All sensors averaged)"}
+                  {selectedMetric} Trend • {selectedPlotName} • {selectedModuleId || "—"} {selectedSensor !== "all" ? `• ${selectedSensor}` : "(All sensors averaged)"}
           </h3>
+          {selectedModuleId && !moduleIndex?.[selectedModuleId]?.farmId ? (
+            <p className="mt-1 text-xs text-gray-500">Module not found in your farms.</p>
+          ) : null}
         </div>
         <div className="px-6 pb-6">
           <div className="w-full h-60 sm:h-80 rounded-2xl overflow-hidden bg-gray-50">
             {loading ? (
               <div className="flex justify-center items-center w-full h-full">
-                <div className="w-8 h-8 border-3 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                <LoadingSpinner size="md" text="Loading chart data..." />
+              </div>
+            ) : selectedModuleId && !moduleIndex?.[selectedModuleId]?.farmId ? (
+              <div className="flex flex-col justify-center items-center w-full h-full text-center px-6">
+                <div className="text-sm font-semibold text-gray-900">Module not found</div>
+                <div className="mt-1 text-xs text-gray-500">
+                  This module is not present under your Firebase farms.
+                </div>
+              </div>
+            ) : !hasAnyHistoryForSelected ? (
+              <div className="flex flex-col justify-center items-center w-full h-full text-center px-6">
+                <div className="text-sm font-semibold text-gray-900">No historical data</div>
+                <div className="mt-1 text-xs text-gray-500">
+                  No historical readings found in Firebase for this module.
+                </div>
+              </div>
+            ) : !hasTrendPoints ? (
+              <div className="flex flex-col justify-center items-center w-full h-full text-center px-6">
+                <div className="text-sm font-semibold text-gray-900">No points for this selection</div>
+                <div className="mt-1 text-xs text-gray-500">
+                  Try another metric or choose a specific sensor.
+                </div>
               </div>
             ) : (
               <Chart options={chartOptions} series={chartSeries} type="line" height="100%" />

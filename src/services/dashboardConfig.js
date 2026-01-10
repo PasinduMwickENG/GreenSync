@@ -1,6 +1,7 @@
 // src/services/dashboardConfig.js
 import { ref, get, set, update, onValue, remove } from 'firebase/database';
-import { rtdb } from '../firebaseConfig';
+import { rtdb, db } from '../firebaseConfig';
+import { httpsCallable } from 'firebase/functions';
 
 /**
  * Dashboard Configuration Service
@@ -40,6 +41,7 @@ class DashboardConfigService {
                 defaultView: 'grid',
                 autoRefresh: true,
                 refreshInterval: 5000,
+                samplingIntervalMs: 5 * 60 * 1000,
                 theme: 'light'
             },
             createdAt: Date.now(),
@@ -236,6 +238,177 @@ class DashboardConfigService {
             return modules;
         } catch (error) {
             console.error('Error getting user modules:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Get module registry entry
+     * @param {string} moduleId
+     * @returns {Promise<Object|null>} module data or null
+     */
+    async getModule(moduleId) {
+        try {
+            const moduleRef = ref(rtdb, `modules/${moduleId}`);
+            const snap = await get(moduleRef);
+            if (!snap.exists()) return null;
+            return { id: moduleId, ...(snap.val() || {}) };
+        } catch (error) {
+            console.error('Error fetching module:', error);
+            return null;
+        }
+    }
+
+    /**
+     * Assign a module to a plot (atomic update)
+     */
+    async assignModuleToPlot(userId, moduleId, plotId) {
+        console.log(`DashboardConfig: assignModuleToPlot module=${moduleId} plot=${plotId} user=${userId}`);
+        try {
+            // Prefer server-side callable function for security and atomicity
+            if (functions) {
+                const claim = httpsCallable(functions, 'claimModule');
+                const res = await claim({ userId, moduleId, plotId });
+                return res.data;
+            }
+
+            const moduleRef = ref(rtdb, `modules/${moduleId}`);
+            const snap = await get(moduleRef);
+            const moduleData = snap.val();
+
+            if (moduleData && moduleData.assignedTo && moduleData.assignedTo !== userId) {
+                throw new Error('Module already assigned to another user');
+            }
+
+            const rootRef = ref(rtdb, '/');
+            const updates = {};
+            updates[`modules/${moduleId}/assignedTo`] = userId;
+            updates[`modules/${moduleId}/status`] = 'assigned';
+            updates[`modules/${moduleId}/farmId`] = plotId;
+            updates[`modules/${moduleId}/lastRegisteredAt`] = Date.now();
+            updates[`users/${userId}/farms/${plotId}/modules/${moduleId}`] = {
+                createdAt: Date.now()
+            };
+
+            await update(rootRef, updates);
+            console.log(`DashboardConfig: module ${moduleId} assigned to ${userId}/${plotId}`);
+        } catch (error) {
+            console.error('Error assigning module to plot:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Unassign a module from any plot of the user (atomic update)
+     */
+    async unassignModule(userId, moduleId) {
+        console.log(`DashboardConfig: unassignModule module=${moduleId} user=${userId}`);
+        try {
+            // Import locally to avoid Rollup tree-shaking issues
+            const { functions } = await import('../firebaseConfig');
+            
+            // Try Cloud Function first
+            if (functions) {
+                try {
+                    const release = httpsCallable(functions, 'releaseModule');
+                    const res = await release({ userId, moduleId });
+                    console.log(`DashboardConfig: module ${moduleId} unassigned for user ${userId} (Cloud Function)`);
+                    return res.data;
+                } catch (fnError) {
+                    console.warn('Cloud Function failed, falling back to RTDB:', fnError.message);
+                }
+            }
+
+            // Fallback: Direct RTDB update - remove from BOTH user's farms AND global module registry
+            const deletes = [];
+
+            // 1. Remove from all of user's farms
+            const farmsSnap = await get(ref(rtdb, `users/${userId}/farms`));
+            if (farmsSnap.exists()) {
+                const farms = farmsSnap.val();
+                Object.keys(farms).forEach((fid) => {
+                    if (farms[fid]?.modules?.[moduleId]) {
+                        console.log(`Removing module ${moduleId} from farm ${fid}`);
+                        deletes.push(remove(ref(rtdb, `users/${userId}/farms/${fid}/modules/${moduleId}`)));
+                    }
+                });
+            }
+
+            // 2. Also delete from global modules registry if user owns it
+            const moduleSnap = await get(ref(rtdb, `modules/${moduleId}`));
+            if (moduleSnap.exists()) {
+                const moduleData = moduleSnap.val();
+                if (moduleData?.assignedTo === userId) {
+                    console.log(`Also removing global module ${moduleId} entry`);
+                    deletes.push(remove(ref(rtdb, `modules/${moduleId}`)));
+                }
+            }
+
+            if (deletes.length === 0) {
+                console.warn('Module not found anywhere');
+                throw new Error('Module not found');
+            }
+
+            // Execute all deletions in parallel
+            await Promise.all(deletes);
+            console.log(`DashboardConfig: module ${moduleId} successfully removed from farms and global registry`);
+        } catch (error) {
+            console.error('Error unassigning module:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Remove a module entirely (owner-only). Deletes module node and any references in the owner's farms.
+     */
+    async removeModule(userId, moduleId, { force = false } = {}) {
+        console.log(`DashboardConfig: removeModule module=${moduleId} user=${userId} force=${force}`);
+        try {
+            if (functions) {
+                const removeFn = httpsCallable(functions, 'removeModule');
+                const res = await removeFn({ userId, moduleId, force });
+                return res.data;
+            }
+
+            const moduleRef = ref(rtdb, `modules/${moduleId}`);
+            const snap = await get(moduleRef);
+            const moduleData = snap.val();
+
+            if (moduleData && moduleData.assignedTo && moduleData.assignedTo !== userId) {
+                if (!force) {
+                    throw new Error('Not authorized to remove module');
+                }
+                // If force remove is requested, verify caller is admin
+                const { getDoc, doc } = await import('firebase/firestore');
+                const { db } = await import('../firebaseConfig');
+                const userSnap = await getDoc(doc(db, 'users', userId));
+                const userData = userSnap.exists() ? userSnap.data() : {};
+                if (userData.role !== 'admin') {
+                    throw new Error('Not authorized to force remove module');
+                }
+            }
+
+            const rootRef = ref(rtdb, '/');
+            const updates = {};
+
+            // Remove from any of the user's farms
+            const farmsSnap = await get(ref(rtdb, `users/${userId}/farms`));
+            if (farmsSnap.exists()) {
+                const farms = farmsSnap.val();
+                Object.keys(farms).forEach((fid) => {
+                    if (farms[fid] && farms[fid].modules && farms[fid].modules[moduleId]) {
+                        updates[`users/${userId}/farms/${fid}/modules/${moduleId}`] = null;
+                    }
+                });
+            }
+
+            // Delete module registry node
+            updates[`modules/${moduleId}`] = null;
+
+            await update(rootRef, updates);
+            console.log(`DashboardConfig: module ${moduleId} removed by user ${userId} (force=${force})`);
+        } catch (error) {
+            console.error('Error removing module:', error);
             throw error;
         }
     }

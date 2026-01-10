@@ -13,6 +13,8 @@ import {
     Minus,
     RefreshCw
 } from 'lucide-react';
+import { toast } from 'sonner';
+import dashboardConfig from '../services/dashboardConfig';
 
 const getSensorIcon = (paramId) => {
     const icons = {
@@ -70,14 +72,20 @@ const formatParameterName = (paramId) => {
     return names[paramId] || paramId;
 };
 
-const MultiModuleView = ({ userId, modules, parameters, plotName }) => {
+const MultiModuleView = ({ userId, modules, parameters, plotName, plotId, onModuleRemoved }) => {
     const [sensorData, setSensorData] = useState({});
+    const [moduleMeta, setModuleMeta] = useState({});
     const [loading, setLoading] = useState(true);
     const [lastUpdate, setLastUpdate] = useState(null);
+    const [userIsAdmin, setUserIsAdmin] = useState(false);
+    const [actionLoading, setActionLoading] = useState({});
 
     useEffect(() => {
+        let mounted = true;
+
         if (!userId || modules.length === 0) {
             setLoading(false);
+            setModuleMeta({});
             return;
         }
 
@@ -119,7 +127,35 @@ const MultiModuleView = ({ userId, modules, parameters, plotName }) => {
             unsubscribers.push(unsubscribe);
         });
 
+        // Fetch module metadata and admin role
+        (async () => {
+            try {
+                const meta = {};
+                for (const id of modules) {
+                    const m = await dashboardConfig.getModule(id);
+                    if (mounted) meta[id] = m || { id };
+                }
+                if (mounted) setModuleMeta(meta);
+
+                // check admin
+                try {
+                    const { doc, getDoc } = await import('firebase/firestore');
+                    const { db } = await import('../firebaseConfig');
+                    const me = await getDoc(doc(db, 'users', userId));
+                    if (me.exists()) {
+                        const d = me.data();
+                        if (d.role === 'admin') setUserIsAdmin(true);
+                    }
+                } catch (e) {
+                    // ignore
+                }
+            } catch (err) {
+                console.warn('MultiModuleView: failed to load module metadata', err);
+            }
+        })();
+
         return () => {
+            mounted = false;
             unsubscribers.forEach(unsub => unsub());
         };
     }, [userId, modules]);
@@ -173,15 +209,15 @@ const MultiModuleView = ({ userId, modules, parameters, plotName }) => {
     return (
         <div className="space-y-6">
             {/* Header */}
-            <div className="flex items-center justify-between">
-                <div>
-                    <h3 className="text-xl font-bold text-gray-900">{plotName}</h3>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                    <h3 className="text-xl font-bold text-gray-900 leading-tight break-words">{plotName}</h3>
                     <p className="text-sm text-gray-500">
                         Comparing {modules.length} module{modules.length !== 1 ? 's' : ''}
                         {lastUpdate && ` • Last updated: ${lastUpdate.toLocaleTimeString()}`}
                     </p>
                 </div>
-                <div className="flex items-center gap-2 px-3 py-1.5 bg-green-50 rounded-full">
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-green-50 rounded-full self-start sm:self-auto">
                     <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
                     <span className="text-sm font-semibold text-green-700">Live</span>
                 </div>
@@ -233,8 +269,13 @@ const MultiModuleView = ({ userId, modules, parameters, plotName }) => {
                                                         : 'border-gray-200 bg-gray-50'
                                                     }`}
                                             >
-                                                <div className="flex items-center justify-between mb-2">
-                                                    <p className="font-semibold text-sm text-gray-900">{moduleId}</p>
+                                                <div className="flex items-center justify-between mb-2 gap-2">
+                                                    <p
+                                                        className="min-w-0 font-semibold text-sm text-gray-900 truncate"
+                                                        title={moduleId}
+                                                    >
+                                                        {moduleId}
+                                                    </p>
                                                     {isMax && <TrendingUp className="w-4 h-4 text-red-600" />}
                                                     {isMin && <TrendingDown className="w-4 h-4 text-blue-600" />}
                                                     {!isMax && !isMin && <Minus className="w-4 h-4 text-gray-400" />}
@@ -251,6 +292,56 @@ const MultiModuleView = ({ userId, modules, parameters, plotName }) => {
                                                         {(value - comparison.avg).toFixed(1)}{unit} from avg
                                                     </div>
                                                 )}
+
+                                                {/* Module actions */}
+                                                <div className="mt-3 flex items-center gap-2">
+                                                    {moduleMeta[moduleId]?.assignedTo === userId ? (
+                                                        <button
+                                                            onClick={async () => {
+                                                                if (actionLoading[moduleId]) return;
+                                                                setActionLoading(prev => ({ ...prev, [moduleId]: true }));
+                                                                try {
+                                                                    await dashboardConfig.unassignModule(userId, moduleId);
+                                                                    toast.success('Module unassigned');
+                                                                    if (onModuleRemoved) onModuleRemoved(moduleId);
+                                                                } catch (err) {
+                                                                    console.error('Failed to unassign module', err);
+                                                                    toast.error('Failed to remove module');
+                                                                } finally {
+                                                                    setActionLoading(prev => ({ ...prev, [moduleId]: false }));
+                                                                }
+                                                            }}
+                                                            disabled={actionLoading[moduleId]}
+                                                            className="px-3 py-1 rounded-md bg-red-50 text-red-700 text-sm"
+                                                        >{actionLoading[moduleId] ? 'Removing...' : 'Remove'}</button>
+                                                    ) : (
+                                                        (userIsAdmin && moduleMeta[moduleId]?.assignedTo) ? (
+                                                            <button
+                                                                onClick={async () => {
+                                                                    if (actionLoading[moduleId]) return;
+                                                                    setActionLoading(prev => ({ ...prev, [moduleId]: true }));
+                                                                    try {
+                                                                        await dashboardConfig.removeModule(userId, moduleId, { force: true });
+                                                                        toast.success('Module force-removed');
+                                                                        if (onModuleRemoved) onModuleRemoved(moduleId);
+                                                                    } catch (err) {
+                                                                        console.error('Force-remove failed', err);
+                                                                        toast.error('Failed to force remove module');
+                                                                    } finally {
+                                                                        setActionLoading(prev => ({ ...prev, [moduleId]: false }));
+                                                                    }
+                                                                }}
+                                                                disabled={actionLoading[moduleId]}
+                                                                className="px-3 py-1 rounded-md bg-red-50 text-red-700 text-sm"
+                                                            >{actionLoading[moduleId] ? 'Removing...' : 'Force Remove'}</button>
+                                                        ) : (
+                                                            <button
+                                                                onClick={() => navigator.clipboard?.writeText(moduleId).then(() => toast.success('Module ID copied'))}
+                                                                className="px-3 py-1 rounded-md bg-white border text-sm"
+                                                            >Copy ID</button>
+                                                        )
+                                                    )}
+                                                </div>
                                             </div>
                                         );
                                     })}

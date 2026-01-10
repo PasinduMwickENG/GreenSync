@@ -1,8 +1,11 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
+import { useAuthState } from 'react-firebase-hooks/auth';
+import { auth, rtdb } from '../firebaseConfig';
+import { ref, onValue } from 'firebase/database';
 import {
   AlertTriangle,
   CheckCircle,
@@ -12,9 +15,6 @@ import {
   BellRing,
   Info
 } from 'lucide-react';
-
-const ALERTS_API_URL = '/api/alerts';
-const SENSOR_DATA_API_URL = 'https://8j84zathh0.execute-api.ap-south-1.amazonaws.com/sensor-data';
 
 const DEFAULT_THRESHOLDS = {
   temperature: { min: 15, max: 35 },
@@ -132,58 +132,54 @@ const generateAlertsFromSensorData = (sensorData, thresholds = DEFAULT_THRESHOLD
 };
 
 // --- Alerts Component ---
-const Alerts = ({ alertsApiUrl = ALERTS_API_URL, sensorApiUrl = SENSOR_DATA_API_URL, pollInterval = 60000 }) => {
+const Alerts = () => {
+  const [user] = useAuthState(auth);
   const [alerts, setAlerts] = useState([]);
   const [moduleFilter, setModuleFilter] = useState('all');
   const [sensorFilter, setSensorFilter] = useState('all');
-  const [loading, setLoading] = useState(false);
-  const [lastFetchFrom] = useState({ usedAlertsEndpoint: false });
-
-  const fetchAlerts = useCallback(async () => {
-    setLoading(true);
-    try {
-      if (alertsApiUrl) {
-        try {
-          const res = await fetch(alertsApiUrl);
-          if (res.ok) {
-            const data = await res.json();
-            if (Array.isArray(data) && data.length > 0) {
-              setAlerts(data.map(normalizeAlertFromApi));
-              lastFetchFrom.usedAlertsEndpoint = true;
-              setLoading(false);
-              return;
-            }
-          }
-        } catch {}
-      }
-
-      const sres = await fetch(sensorApiUrl);
-      if (!sres.ok) throw new Error(`Sensor API Error: ${sres.status}`);
-      const sensorData = await sres.json();
-      setAlerts(generateAlertsFromSensorData(sensorData));
-      lastFetchFrom.usedAlertsEndpoint = false;
-    } catch (err) {
-      console.error('Failed to fetch alerts or generate from sensor data', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [alertsApiUrl, sensorApiUrl]);
+  const [userPlots, setUserPlots] = useState({});
+  const [userFarms, setUserFarms] = useState({});
 
   useEffect(() => {
-    fetchAlerts();
-    const id = setInterval(fetchAlerts, pollInterval);
-    return () => clearInterval(id);
-  }, [fetchAlerts, pollInterval]);
+    if (!user) return;
+    const plotsRef = ref(rtdb, `users/${user.uid}/dashboardConfig/plots`);
+    const unsub = onValue(plotsRef, (snap) => setUserPlots(snap.val() || {}));
+    return () => unsub();
+  }, [user]);
 
-  const normalizeAlertFromApi = raw => ({
-    id: raw.id ?? raw.alertId ?? `${raw.module}_${raw.sensor}_${Math.random().toString(36).slice(2, 9)}`,
-    moduleName: raw.moduleName ?? raw.module ?? 'Unknown',
-    sensor: raw.sensor ?? raw.sensor_id ?? 'unknown_sensor',
-    type: (raw.type ?? raw.severity ?? 'info').toLowerCase(),
-    message: raw.message ?? raw.text ?? 'No message',
-    timestamp: raw.timestamp ?? new Date().toISOString(),
-    acknowledged: !!raw.acknowledged
-  });
+  useEffect(() => {
+    if (!user) return;
+    const farmsRef = ref(rtdb, `users/${user.uid}/farms`);
+    const unsub = onValue(farmsRef, (snap) => setUserFarms(snap.val() || {}));
+    return () => unsub();
+  }, [user]);
+
+  const assignedModuleIds = useMemo(() => {
+    const ids = new Set();
+    Object.values(userPlots || {}).forEach((plot) => {
+      (plot?.modules || []).forEach((mid) => ids.add(mid));
+    });
+    return Array.from(ids);
+  }, [userPlots]);
+
+  const sensorDataForAlerts = useMemo(() => {
+    const out = {};
+    assignedModuleIds.forEach((moduleId) => {
+      let latest = null;
+      Object.values(userFarms || {}).some((farm) => {
+        const mod = farm?.modules?.[moduleId];
+        if (!mod) return false;
+        latest = mod.latestReading || mod.sensors || null;
+        return true;
+      });
+      out[moduleId] = latest && typeof latest === 'object' ? [{ ...latest, sensor_id: latest.sensor_id || 'unknown_sensor' }] : [];
+    });
+    return out;
+  }, [assignedModuleIds, userFarms]);
+
+  useEffect(() => {
+    setAlerts(generateAlertsFromSensorData(sensorDataForAlerts));
+  }, [sensorDataForAlerts]);
 
   const acknowledgeAlert = alertId => setAlerts(prev => prev.map(a => a.id === alertId ? { ...a, acknowledged: true } : a));
   const dismissAlert = alertId => setAlerts(prev => prev.filter(a => a.id !== alertId));

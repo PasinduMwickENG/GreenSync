@@ -1,0 +1,120 @@
+{
+  "rules": {
+    "users": {
+      "$uid": {
+        ".read": "$uid === auth.uid",
+        ".write": "$uid === auth.uid",
+        "setupCompleted": {
+          ".validate": "newData.isBoolean()"
+        },
+        "farms": {
+          "$farmId": {
+            ".validate": "newData.hasChildren(['modules']) || !newData.exists()",
+            "modules": {
+              "$moduleId": {
+                ".validate": "newData.hasChildren() || !newData.exists()",
+                "crop": {
+                  ".validate": "newData.isString()"
+                },
+                "location": {
+                  ".validate": "newData.isString()"
+                },
+                "createdAt": {
+                  ".validate": "newData.isNumber()"
+                },
+                "sensorReadings": {
+                  "$timestamp": {
+                    ".validate": "newData.hasChildren(['timestamp']) && newData.child('timestamp').isNumber()",
+                    "temperature": {
+                      ".validate": "newData.isNumber()"
+                    },
+                    "humidity": {
+                      ".validate": "newData.isNumber()"
+                    },
+                    "soilMoisture": {
+                      ".validate": "newData.isNumber()"
+                    },
+                    "ph": {
+                      ".validate": "newData.isNumber()"
+                    },
+                    "timestamp": {
+                      ".validate": "newData.isNumber()"
+                    }
+                  }
+                },
+                "latestReading": {
+                  ".validate": "newData.hasChildren(['timestamp'])",
+                  "temperature": {
+                    ".validate": "newData.isNumber()"
+                  },
+                  "humidity": {
+                    ".validate": "newData.isNumber()"
+                  },
+                  "soilMoisture": {
+                    ".validate": "newData.isNumber()"
+                  },
+                  "ph": {
+                    ".validate": "newData.isNumber()"
+                  },
+                  "timestamp": {
+                    ".validate": "newData.isNumber()"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "dashboardConfig": {
+          "plots": {
+            "$plotId": {
+              ".validate": "newData.hasChildren(['name', 'type', 'modules', 'parameters']) || !newData.exists()"
+            }
+          },
+          "preferences": {
+            ".validate": "newData.hasChildren() || !newData.exists()"
+          }
+        }
+      }
+    },
+    "modules": {
+      "$moduleId": {
+        ".read": "auth != null",
+        ".write": "(auth != null && (!data.exists() || data.child('assignedTo').val() === auth.uid || data.child('assignedTo').val() === '' || data.child('assignedTo').val() === null)) || (!data.exists() && newData.child('status').val() === 'unassigned')",
+        ".validate": "newData.hasChildren(['assignedTo', 'status']) || !newData.exists()",
+        "assignedTo": {
+          ".validate": "newData.isString() || !newData.exists()"
+        },
+        "status": {
+          ".validate": "(newData.isString() && (newData.val() === 'assigned' || newData.val() === 'unassigned')) || !newData.exists()"
+        },
+        "farmId": {
+          ".validate": "newData.isString() || !newData.exists()"
+        },
+        "lastRegisteredAt": {
+          ".validate": "newData.isNumber() || !newData.exists()"
+        },
+        "registeredAt": {
+          ".validate": "newData.isNumber() || !newData.exists()"
+        },
+        "deviceType": {
+          ".validate": "newData.isString() || !newData.exists()"
+        },
+        "firmwareVersion": {
+          ".validate": "newData.isString() || !newData.exists()"
+        }
+      }
+    },
+    "sensorData": {
+      "$farmId": {
+        ".read": "auth != null && root.child('users').child(auth.uid).child('farms').child($farmId).exists()",
+        ".write": "auth != null && root.child('users').child(auth.uid).child('farms').child($farmId).exists()"
+      }
+    },
+    "actuators": {
+      "$farmId": {
+        ".read": "auth != null && root.child('users').child(auth.uid).child('farms').child($farmId).exists()",
+        ".write": "auth != null && root.child('users').child(auth.uid).child('farms').child($farmId).exists()"
+      }
+    }
+  }
+}

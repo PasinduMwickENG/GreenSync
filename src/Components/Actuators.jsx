@@ -113,7 +113,13 @@ const Actuators = () => {
       setLoading(false);
     });
 
-    return () => unsubscribe();
+    return () => {
+      try {
+        unsubscribe();
+      } catch {
+        // ignore
+      }
+    };
   }, [user]);
 
   const getActuatorIcon = (actuatorType) => {

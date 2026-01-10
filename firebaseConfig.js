@@ -3,6 +3,7 @@ import { initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getDatabase } from "firebase/database";
+import { getFunctions } from "firebase/functions";
 
 
 // Read Firebase config from Vite environment variables (VITE_FIREBASE_*)
@@ -26,4 +27,12 @@ const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const rtdb = getDatabase(app);
+
+let functionsInstance = null;
+try {
+  functionsInstance = getFunctions(app);
+} catch (error) {
+  console.warn('Failed to initialize Cloud Functions:', error.message);
+}
+export const functions = functionsInstance;
 

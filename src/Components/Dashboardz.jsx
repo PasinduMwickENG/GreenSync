@@ -1,11 +1,17 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
-import { auth, rtdb } from '../firebaseConfig';
+import { auth, rtdb, db } from '../firebaseConfig';
 import { ref, onValue } from 'firebase/database';
+import { doc, getDoc } from 'firebase/firestore';
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
+import dashboardConfig from '../services/dashboardConfig';
+import ConfirmDialog from './Dialogs/ConfirmDialog';
+import { LoadingSpinner } from './ui/loading-spinner';
+import { EmptyState, ErrorState } from './ui/states';
 import {
   MapPin,
   Activity,
@@ -19,6 +25,8 @@ import {
   CloudRain,
   Thermometer,
   Settings,
+  Trash2,
+  LayoutGrid,
 } from 'lucide-react';
 
 const parseTimestampToMs = (ts) => {
@@ -35,37 +43,43 @@ const Dashboardz = ({ onModuleSelect, onNavigateToSensors, onAddGreenhouse, hide
   const navigate = useNavigate();
   const [modules, setModules] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
+  const [moduleToRemove, setModuleToRemove] = useState(null);
+  const [removing, setRemoving] = useState(false);
+  const [userPlots, setUserPlots] = useState({});
+  const [error, setError] = useState(null);
 
-  const processApiData = (data) => {
-    const result = [];
+  // Check if user is admin
+  useEffect(() => {
+    let mounted = true;
+    const checkAdmin = async () => {
+      if (!user) return;
+      try {
+        const userDoc = await getDoc(doc(db, 'users', user.uid));
+        if (mounted && userDoc.exists()) {
+          setIsAdmin(userDoc.data()?.role === 'admin');
+        }
+      } catch (err) {
+        console.warn('Failed to check admin role', err);
+      }
+    };
+    checkAdmin();
+    return () => { mounted = false; };
+  }, [user]);
 
-    for (const [moduleId, sensorArr] of Object.entries(data)) {
-      if (!sensorArr.length) continue;
+  // Listen to user's custom plots
+  useEffect(() => {
+    if (!user) return;
 
-      const latestSensorData = sensorArr.reduce((latest, current) =>
-        Number(current.timestamp) > Number(latest.timestamp) ? current : latest
-      );
+    const plotsRef = ref(rtdb, `users/${user.uid}/dashboardConfig/plots`);
+    const unsubscribe = onValue(plotsRef, (snapshot) => {
+      const plots = snapshot.val() || {};
+      setUserPlots(plots);
+    });
 
-      result.push({
-        id: moduleId,
-        name: moduleId.replace('_', ' ').toUpperCase(),
-        location: latestSensorData.location || 'Unknown',
-        status: 'active',
-        crop: latestSensorData.croptype || 'Unknown',
-        cropHealth: 'good',
-        weather: {
-          condition: 'sunny',
-          temperature: parseFloat(latestSensorData.temperature) || 0,
-          humidity: latestSensorData.humidity || 0,
-          description: `Temp: ${latestSensorData.temperature || 0}°C • Humidity: ${latestSensorData.humidity || 0}%`,
-        },
-        lastUpdated: latestSensorData.timestamp ? new Date(parseTimestampToMs(latestSensorData.timestamp)).toLocaleString() : 'Never',
-        sensorData: latestSensorData,
-      });
-    }
-
-    return result;
-  };
+    return () => unsubscribe();
+  }, [user]);
 
   useEffect(() => {
     if (!user) return;
@@ -81,10 +95,28 @@ const Dashboardz = ({ onModuleSelect, onNavigateToSensors, onAddGreenhouse, hide
         return;
       }
 
+      // Get all module IDs that are part of custom plots
+      const plotModuleIds = new Set();
+      Object.values(userPlots).forEach(plot => {
+        if (plot.modules && Array.isArray(plot.modules)) {
+          plot.modules.forEach(moduleId => plotModuleIds.add(moduleId));
+        }
+      });
+
+      // If no custom plots exist, don't show any modules
+      if (plotModuleIds.size === 0) {
+        setModules([]);
+        setLoading(false);
+        return;
+      }
+
       const processedModules = [];
       Object.entries(data).forEach(([farmId, farmData]) => {
         if (farmData.modules) {
           Object.entries(farmData.modules).forEach(([moduleId, moduleData]) => {
+            // Only include modules that are part of user-created plots
+            if (!plotModuleIds.has(moduleId)) return;
+
             // Read from latestReading (new structure) or fallback to sensors (old structure)
             const sensors = moduleData.latestReading || moduleData.sensors || {};
 
@@ -120,11 +152,18 @@ const Dashboardz = ({ onModuleSelect, onNavigateToSensors, onAddGreenhouse, hide
       setLoading(false);
     }, (error) => {
       console.error('RTDB Listener error:', error);
+      setError('Failed to load dashboard data.');
       setLoading(false);
     });
 
-    return () => unsubscribe();
-  }, [user]);
+    return () => {
+      try {
+        unsubscribe();
+      } catch {
+        // ignore
+      }
+    };
+  }, [user, userPlots]);
 
   const getStatusColor = (status) => {
     switch (status) {
@@ -194,14 +233,53 @@ const Dashboardz = ({ onModuleSelect, onNavigateToSensors, onAddGreenhouse, hide
     if (onAddGreenhouse) onAddGreenhouse();
   };
 
-  if (loading) return <div className="mt-50 flex flex-col justify-center items-center py-8">
-    <svg className="spinner" viewBox="0 0 66 66" xmlns="http://www.w3.org/2000/svg">
-      <circle className="path" fill="none" strokeWidth="6" strokeLinecap="round" cx="33" cy="33" r="30"></circle>
-    </svg>
-    <span className="mt-4 text-gray-600 font-semibold text-lg">
-      LOADING MODULES
-    </span>
-  </div>
+  const handleRemoveModule = (module) => {
+    setModuleToRemove(module);
+    setRemoveConfirmOpen(true);
+  };
+
+  const confirmRemoveModule = async () => {
+    if (!moduleToRemove || !user) return;
+    setRemoving(true);
+    try {
+      console.log(`Attempting to remove module ${moduleToRemove.id} for user ${user.uid}`);
+      await dashboardConfig.unassignModule(user.uid, moduleToRemove.id);
+      console.log(`Successfully removed module ${moduleToRemove.id}`);
+      // Wait a moment for RTDB to update the listener
+      await new Promise(resolve => setTimeout(resolve, 500));
+      toast.success('Module unassigned');
+      setRemoveConfirmOpen(false);
+      setModuleToRemove(null);
+    } catch (err) {
+      console.error('Failed to remove module - Full error object:', err);
+      console.error('Error code:', err.code);
+      console.error('Error message:', err.message);
+      const errorMsg = err.message || err.code || 'Unknown error';
+      toast.error(`Failed to remove module: ${errorMsg}`);
+    } finally {
+      setRemoving(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-[60vh] flex items-center justify-center">
+        <LoadingSpinner size="xl" text="Loading your modules..." />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="p-6">
+        <ErrorState 
+          title="Failed to load modules"
+          message={error}
+          onRetry={() => window.location.reload()}
+        />
+      </div>
+    );
+  }
 
   if (!modules.length) return (
     <div className="flex flex-col items-center justify-center min-h-[60vh] p-6 text-center">
@@ -293,9 +371,18 @@ const Dashboardz = ({ onModuleSelect, onNavigateToSensors, onAddGreenhouse, hide
                     <span>{module.location}</span>
                   </div>
                 </div>
-                <div className={`px-3 py-2 rounded-full text-xs md:text-sm font-semibold flex items-center gap-1 backdrop-blur-sm ${getStatusColor(module.status)}`}>
-                  {getStatusIcon(module.status)}
-                  <span className="ml-1 capitalize">{module.status}</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleRemoveModule(module); }}
+                    className="px-3 py-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-700 text-xs font-semibold transition-colors"
+                    title="Remove this module"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                  <div className={`px-3 py-2 rounded-full text-xs md:text-sm font-semibold flex items-center gap-1 backdrop-blur-sm ${getStatusColor(module.status)}`}>
+                    {getStatusIcon(module.status)}
+                    <span className="ml-1 capitalize">{module.status}</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -360,6 +447,16 @@ const Dashboardz = ({ onModuleSelect, onNavigateToSensors, onAddGreenhouse, hide
           </div>
         ))}
       </div>
+
+      <ConfirmDialog
+        open={removeConfirmOpen}
+        title={`Remove module ${moduleToRemove?.name}?`}
+        message="This will unassign the module and make it available for others to claim."
+        danger={true}
+        confirmText="Remove"
+        onCancel={() => { setRemoveConfirmOpen(false); setModuleToRemove(null); }}
+        onConfirm={confirmRemoveModule}
+      />
     </div>
   );
 };
