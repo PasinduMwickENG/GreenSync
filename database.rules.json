@@ -59,6 +59,34 @@
                   "timestamp": {
                     ".validate": "newData.isNumber()"
                   }
+                },
+                "nodes": {
+                  "$nodeId": {
+                    ".write": "auth != null",
+                    ".read": "auth != null",
+                    "temperature": {
+                      ".validate": "newData.isNumber()"
+                    },
+                    "rssi": {
+                      ".validate": "newData.isNumber()"
+                    },
+                    "snr": {
+                      ".validate": "newData.isNumber()"
+                    },
+                    "sequenceId": {
+                      ".validate": "newData.isNumber()"
+                    },
+                    "timestamp": {
+                      ".validate": "newData.isNumber()"
+                    },
+                    "history": {
+                      "$recordId": {
+                        ".write": "auth != null",
+                        ".read": "auth != null",
+                        ".validate": "newData.hasChildren() || !newData.exists()"
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -78,29 +106,35 @@
     },
     "modules": {
       "$moduleId": {
-        ".read": "auth != null",
-        ".write": "(auth != null && (!data.exists() || data.child('assignedTo').val() === auth.uid || data.child('assignedTo').val() === '' || data.child('assignedTo').val() === null)) || (!data.exists() && newData.child('status').val() === 'unassigned')",
-        ".validate": "newData.hasChildren(['assignedTo', 'status']) || !newData.exists()",
+        ".read": "auth != null && (data.child('assignedTo').val() === auth.uid || !data.exists() || data.child('assignedTo').val() === null || data.child('assignedTo').val() === '')",
+        ".write": "auth != null",
         "assignedTo": {
-          ".validate": "newData.isString() || !newData.exists()"
+          ".write": "auth != null && (data.val() === null || data.val() === '' || data.val() === auth.uid)",
+          ".validate": "newData.isString()"
         },
         "status": {
-          ".validate": "(newData.isString() && (newData.val() === 'assigned' || newData.val() === 'unassigned')) || !newData.exists()"
+          ".write": "auth != null",
+          ".validate": "newData.isString() && (newData.val() === 'assigned' || newData.val() === 'unassigned')"
         },
         "farmId": {
-          ".validate": "newData.isString() || !newData.exists()"
-        },
-        "lastRegisteredAt": {
-          ".validate": "newData.isNumber() || !newData.exists()"
-        },
-        "registeredAt": {
-          ".validate": "newData.isNumber() || !newData.exists()"
+          ".write": "auth != null",
+          ".validate": "newData.isString()"
         },
         "deviceType": {
-          ".validate": "newData.isString() || !newData.exists()"
+          ".write": "auth != null",
+          ".validate": "newData.isString()"
+        },
+        "lastRegisteredAt": {
+          ".write": "auth != null",
+          ".validate": "newData.isNumber()"
+        },
+        "registeredAt": {
+          ".write": "auth != null",
+          ".validate": "newData.isNumber()"
         },
         "firmwareVersion": {
-          ".validate": "newData.isString() || !newData.exists()"
+          ".write": "auth != null",
+          ".validate": "newData.isString()"
         }
       }
     },

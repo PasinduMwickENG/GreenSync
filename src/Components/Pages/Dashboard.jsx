@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth } from '../../firebaseConfig';
-import { Plus, LayoutGrid, Cpu, Settings as SettingsIcon } from 'lucide-react';
+import { Plus, LayoutGrid, Cpu, Settings as SettingsIcon, Router } from 'lucide-react';
 import Sidebar from '../Sidebar';
 import LiveSensors from '../LiveSensors';
 import Analytics from '../Analytics';
@@ -11,6 +11,7 @@ import Alerts from '../Alerts';
 import Settings from '../Settings';
 import PlotManager from '../PlotManager';
 import AddModuleDialog from '../Dialogs/AddModuleDialog';
+import AddGatewayDialog from '../Dialogs/AddGatewayDialog';
 import AddPlotDialog from '../Dialogs/AddPlotDialog';
 import dashboardConfig from '../../services/dashboardConfig';
 
@@ -28,6 +29,7 @@ function Dashboard() {
 
   // Dialog states
   const [showAddModuleDialog, setShowAddModuleDialog] = useState(false);
+  const [showAddGatewayDialog, setShowAddGatewayDialog] = useState(false);
   const [showAddPlotDialog, setShowAddPlotDialog] = useState(false);
 
   useEffect(() => {
@@ -124,6 +126,13 @@ function Dashboard() {
     });
   };
 
+  const handleGatewayAdded = (gateway) => {
+    // Refresh available modules (gateways are also modules)
+    dashboardConfig.getUserModules(user.uid).then(modules => {
+      setAvailableModules(modules);
+    });
+  };
+
   const handlePlotAdded = (plot) => {
     // Plot will be automatically updated via subscription
     console.log('Plot added:', plot);
@@ -170,6 +179,13 @@ function Dashboard() {
                   Add Module
                 </button>
                 <button
+                  onClick={() => setShowAddGatewayDialog(true)}
+                  className="flex items-center gap-2 px-4 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-semibold shadow-lg shadow-purple-200 transition-all active:scale-95"
+                >
+                  <Router className="w-4 h-4" />
+                  Add Gateway
+                </button>
+                <button
                   onClick={() => setShowAddPlotDialog(true)}
                   className="flex items-center gap-2 px-4 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-xl font-semibold shadow-lg shadow-green-200 transition-all active:scale-95"
                 >
@@ -214,6 +230,14 @@ function Dashboard() {
         userId={user.uid}
         farms={availableFarms}
         onModuleAdded={handleModuleAdded}
+      />
+
+      <AddGatewayDialog
+        isOpen={showAddGatewayDialog}
+        onClose={() => setShowAddGatewayDialog(false)}
+        userId={user.uid}
+        farms={availableFarms}
+        onGatewayAdded={handleGatewayAdded}
       />
 
       <AddPlotDialog

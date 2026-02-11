@@ -24,52 +24,106 @@ const mapRtdbToModules = (farmData) => {
   Object.entries(farmData).forEach(([farmId, farm]) => {
     if (farm.modules) {
       Object.entries(farm.modules).forEach(([moduleId, moduleData]) => {
-        // Read from latestReading (new structure) or fallback to sensors (old structure)
-        const sensors = moduleData.latestReading || moduleData.sensors || {};
+        // Check if this module has individual nodes (new structure)
+        const hasNodes = moduleData.nodes && typeof moduleData.nodes === 'object';
+        
+        if (hasNodes) {
+          // Create a module entry for each node
+          const sensorModules = [];
+          Object.entries(moduleData.nodes).forEach(([nodeId, nodeData]) => {
+            const temperature = nodeData.temperature ?? 0;
+            const humidity = nodeData.humidity ?? 0;
+            const soilMoisture = nodeData.soilMoisture ?? nodeData.moisture ?? 0;
+            const ph = nodeData.ph ?? nodeData.soilPH ?? nodeData.pH ?? 7;
 
-        // Robust sensor mapping
-        const temperature = sensors.temperature ?? 0;
-        const humidity = sensors.humidity ?? 0;
-        const soilMoisture = sensors.soilMoisture ?? sensors.moisture ?? 0;
-        const ph = sensors.ph ?? sensors.soilPH ?? sensors.pH ?? 7;
+            sensorModules.push({
+              id: `${moduleId}-${nodeId}`,
+              name: `${nodeId}`,
+              location: moduleData.location || farm.name || 'Unknown',
+              lastUpdated: nodeData.timestamp ? new Date(parseTimestampToMs(nodeData.timestamp)).toLocaleString() : 'Never',
+              sensorData: { ...nodeData, temperature, humidity, soilMoisture, ph },
+              status: 'active',
+              sensors: {
+                temperature: {
+                  value: temperature,
+                  unit: '°C',
+                  threshold: { min: 15, max: 35 }
+                },
+                humidity: {
+                  value: humidity,
+                  unit: '%',
+                  threshold: { min: 30, max: 80 }
+                },
+                soilMoisture: {
+                  value: soilMoisture,
+                  unit: '%',
+                  threshold: { min: 20, max: 80 }
+                },
+                soilPH: {
+                  value: ph,
+                  unit: 'pH',
+                  threshold: { min: 5.5, max: 7.5 }
+                }
+              },
+            });
+          });
 
-        processedModules.push({
-          id: moduleId,
-          name: moduleId.toUpperCase(),
-          location: moduleData.location || farm.name || 'Unknown',
-          crop: moduleData.crop || 'Unknown',
-          status: 'active',
-          sensorModules: [{
-            id: `${moduleId}-main`,
-            name: `${moduleId} Sensors`,
-            location: moduleData.location || 'Unknown',
-            lastUpdated: sensors.timestamp ? new Date(parseTimestampToMs(sensors.timestamp)).toLocaleString() : 'Never',
-            sensorData: { ...sensors, temperature, humidity, soilMoisture, ph },
+          processedModules.push({
+            id: moduleId,
+            name: moduleId.toUpperCase(),
+            location: moduleData.location || farm.name || 'Unknown',
+            crop: moduleData.crop || 'Unknown',
             status: 'active',
-            sensors: {
-              temperature: {
-                value: temperature,
-                unit: '°C',
-                threshold: { min: 15, max: 35 }
+            sensorModules: sensorModules
+          });
+        } else {
+          // Fallback to old structure (latestReading or sensors)
+          const sensors = moduleData.latestReading || moduleData.sensors || {};
+
+          // Robust sensor mapping
+          const temperature = sensors.temperature ?? 0;
+          const humidity = sensors.humidity ?? 0;
+          const soilMoisture = sensors.soilMoisture ?? sensors.moisture ?? 0;
+          const ph = sensors.ph ?? sensors.soilPH ?? sensors.pH ?? 7;
+
+          processedModules.push({
+            id: moduleId,
+            name: moduleId.toUpperCase(),
+            location: moduleData.location || farm.name || 'Unknown',
+            crop: moduleData.crop || 'Unknown',
+            status: 'active',
+            sensorModules: [{
+              id: `${moduleId}-main`,
+              name: `${moduleId} Sensors`,
+              location: moduleData.location || 'Unknown',
+              lastUpdated: sensors.timestamp ? new Date(parseTimestampToMs(sensors.timestamp)).toLocaleString() : 'Never',
+              sensorData: { ...sensors, temperature, humidity, soilMoisture, ph },
+              status: 'active',
+              sensors: {
+                temperature: {
+                  value: temperature,
+                  unit: '°C',
+                  threshold: { min: 15, max: 35 }
+                },
+                humidity: {
+                  value: humidity,
+                  unit: '%',
+                  threshold: { min: 30, max: 80 }
+                },
+                soilMoisture: {
+                  value: soilMoisture,
+                  unit: '%',
+                  threshold: { min: 20, max: 80 }
+                },
+                soilPH: {
+                  value: ph,
+                  unit: 'pH',
+                  threshold: { min: 5.5, max: 7.5 }
+                }
               },
-              humidity: {
-                value: humidity,
-                unit: '%',
-                threshold: { min: 30, max: 80 }
-              },
-              soilMoisture: {
-                value: soilMoisture,
-                unit: '%',
-                threshold: { min: 20, max: 80 }
-              },
-              soilPH: {
-                value: ph,
-                unit: 'pH',
-                threshold: { min: 5.5, max: 7.5 }
-              }
-            },
-          }]
-        });
+            }]
+          });
+        }
       });
     }
   });

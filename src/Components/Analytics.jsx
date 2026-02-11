@@ -247,6 +247,8 @@ const Analytics = () => {
 
   const [selectedPlotId, setSelectedPlotId] = useState("");
   const [selectedModuleId, setSelectedModuleId] = useState("");
+  const [selectedNodeId, setSelectedNodeId] = useState(null); // New: for tracking selected node
+  const [availableNodes, setAvailableNodes] = useState([]); // New: cache available nodes
   const [selectedSensor, setSelectedSensor] = useState("all");
   const [selectedMetric, setSelectedMetric] = useState("temperature");
 
@@ -260,22 +262,46 @@ const Analytics = () => {
 
   const [savedZoom, setSavedZoom] = useState(null);
 
-  const loadModuleHistory = async (uid, farmId, moduleId) => {
-    const basePath = `users/${uid}/farms/${farmId}/modules/${moduleId}`;
+  const loadModuleHistory = async (uid, farmId, moduleId, nodeId = null) => {
+    let basePath = `users/${uid}/farms/${farmId}/modules/${moduleId}`;
+    
+    // If nodeId is specified, load history from the node path
+    if (nodeId) {
+      basePath = `users/${uid}/farms/${farmId}/modules/${moduleId}/nodes/${nodeId}`;
+      console.log(`📊 Loading history for node: ${basePath}`);
+    } else {
+      console.log(`📊 Loading history for module: ${basePath}`);
+    }
 
     // Try common history children first (bounded)
     for (const childKey of HISTORY_CHILDREN) {
-      const snap = await get(query(ref(rtdb, `${basePath}/${childKey}`), limitToLast(1000)));
-      if (!snap.exists()) continue;
+      const testPath = `${basePath}/${childKey}`;
+      console.log(`🔍 Checking: ${testPath}`);
+      
+      const snap = await get(query(ref(rtdb, testPath), limitToLast(1000)));
+      if (!snap.exists()) {
+        console.log(`   ❌ Not found`);
+        continue;
+      }
+      
       const records = normalizeRecordsFromUnknownShape(snap.val());
+      console.log(`   ✅ Found ${records.length} records`);
       if (records.length) return records;
     }
 
+    console.log(`📊 No history found, checking for latest reading...`);
     // Fallback: latest snapshot only (not true history)
     const moduleSnap = await get(ref(rtdb, basePath));
     const moduleData = moduleSnap.val() || {};
     const latest = moduleData.latestReading || moduleData.sensors || null;
-    return latest && typeof latest === "object" ? [latest] : [];
+    
+    if (latest && typeof latest === "object") {
+      console.log(`📊 Found latest reading:`, latest);
+      return [latest];
+    }
+    
+    console.log(`⚠️ No data found at all for this module/node`);
+    return [];
   };
 
   // Subscribe to plots
@@ -305,6 +331,44 @@ const Analytics = () => {
     });
     return () => unsub();
   }, [user]);
+
+  // Fetch available nodes for the selected module
+  useEffect(() => {
+    if (!user || !selectedModuleId) {
+      setAvailableNodes([]);
+      setSelectedNodeId(null);
+      return;
+    }
+
+    const farmId = moduleIndex?.[selectedModuleId]?.farmId;
+    if (!farmId) {
+      setAvailableNodes([]);
+      setSelectedNodeId(null);
+      return;
+    }
+
+    const moduleRef = ref(rtdb, `users/${user.uid}/farms/${farmId}/modules/${selectedModuleId}/nodes`);
+    const unsub = onValue(
+      moduleRef,
+      (snap) => {
+        if (snap.exists()) {
+          const nodeIds = Object.keys(snap.val() || {});
+          setAvailableNodes(nodeIds);
+          if (!selectedNodeId || !nodeIds.includes(selectedNodeId)) {
+            setSelectedNodeId(nodeIds[0] || null);
+          }
+        } else {
+          setAvailableNodes([]);
+          setSelectedNodeId(null);
+        }
+      },
+      (err) => {
+        setAvailableNodes([]);
+        setSelectedNodeId(null);
+      }
+    );
+    return () => unsub();
+  }, [user, selectedModuleId, moduleIndex]);
 
   const plotsArray = useMemo(
     () => Object.entries(userPlots || {}).map(([id, plot]) => ({ ...plot, id })),
@@ -351,6 +415,14 @@ const Analytics = () => {
     setSelectedSensor("all");
   };
 
+  const cycleNode = (direction) => {
+    if (!availableNodes.length) return;
+    const current = selectedNodeId && availableNodes.includes(selectedNodeId) ? selectedNodeId : availableNodes[0];
+    const idx = availableNodes.indexOf(current);
+    const nextIdx = (idx + direction + availableNodes.length) % availableNodes.length;
+    setSelectedNodeId(availableNodes[nextIdx]);
+  };
+
   useEffect(() => {
     const run = async () => {
       if (!user || !selectedModuleId) return;
@@ -361,10 +433,21 @@ const Analytics = () => {
       setLoading(true);
 
       try {
-        const records = await loadModuleHistory(user.uid, farmId, selectedModuleId);
+        // If nodes are available, load from the selected node; otherwise load from the module
+        const nodeId = availableNodes.length > 0 ? selectedNodeId : null;
+        console.log(`🔄 Loading history: moduleId=${selectedModuleId}, nodeId=${nodeId}, availableNodes=${availableNodes.join(',')}`);
+        
+        const records = await loadModuleHistory(user.uid, farmId, selectedModuleId, nodeId);
         if (activeFetchRef.current !== fetchId) return;
 
+        console.log(`📝 Loaded ${records.length} records`);
         records.sort((a, b) => (obtainRecordMs(a) ?? 0) - (obtainRecordMs(b) ?? 0));
+
+        // Log the first few records to see structure
+        console.log("📋 First 3 records:");
+        records.slice(0, 3).forEach((r, idx) => {
+          console.log(`   [${idx}]:`, r);
+        });
 
         const sensors = new Set();
         let maxMs = null;
@@ -373,6 +456,8 @@ const Analytics = () => {
           const ms = obtainRecordMs(r);
           if (ms !== null && (maxMs === null || ms > maxMs)) maxMs = ms;
         });
+
+        console.log(`📊 Sensors found: ${Array.from(sensors).join(',')}, Latest timestamp: ${maxMs ? new Date(maxMs).toLocaleString() : 'null'}`);
 
         setHistoryByModule((prev) => ({
           ...prev,
@@ -397,7 +482,7 @@ const Analytics = () => {
     };
 
     run();
-  }, [user, selectedModuleId, moduleIndex, refreshToken, dayCursorMs]);
+  }, [user, selectedModuleId, selectedNodeId, availableNodes, moduleIndex, refreshToken, dayCursorMs]);
 
   // When module changes, reset day cursor so it snaps to the module's latest day
   useEffect(() => {
@@ -472,24 +557,58 @@ const Analytics = () => {
   }, [historyByModule, selectedModuleId]);
 
   const trendData = useMemo(() => {
-    if (!selectedModuleId) return [];
+    if (!selectedModuleId) {
+      console.log("❌ No selectedModuleId");
+      return [];
+    }
+    
     const moduleHistory = historyByModule?.[selectedModuleId];
-    if (!moduleHistory) return [];
+    if (!moduleHistory) {
+      console.log("❌ No moduleHistory for", selectedModuleId);
+      return [];
+    }
+    
+    console.log(`📊 Building trendData: metric=${selectedMetric}, sensor=${selectedSensor}`);
+    console.log(`   Total records: ${moduleHistory.records?.length || 0}`);
+    console.log(`   Display range: ${displayDayStartMs} to ${displayDayEndMs}`);
+    
     const apiKey = metricToApiKey[selectedMetric];
-    if (!apiKey) return [];
+    if (!apiKey) {
+      console.log("❌ Invalid metric:", selectedMetric);
+      return [];
+    }
+    
+    console.log(`   API key: ${apiKey}`);
+    
     const points = [];
-    (moduleHistory.records || []).forEach((r) => {
+    (moduleHistory.records || []).forEach((r, idx) => {
       const sid = r?.sensor_id || "unknown_sensor";
       if (selectedSensor !== "all" && sid !== selectedSensor) return;
+      
       const ts = obtainRecordMs(r);
-      if (!ts) return;
-      if (displayDayStartMs != null && displayDayEndMs != null) {
-        if (ts < displayDayStartMs || ts > displayDayEndMs) return;
+      if (!ts) {
+        console.log(`   [${idx}] ❌ No timestamp for record:`, r);
+        return;
       }
+      
+      if (displayDayStartMs != null && displayDayEndMs != null) {
+        if (ts < displayDayStartMs || ts > displayDayEndMs) {
+          console.log(`   [${idx}] ⏭️ Outside date range: ${ts}`);
+          return;
+        }
+      }
+      
       const val = r[apiKey] == null || r[apiKey] === "" ? NaN : Number(r[apiKey]);
-      if (!isFinite(val)) return;
+      if (!isFinite(val)) {
+        console.log(`   [${idx}] ❌ Invalid value for ${apiKey}:`, r[apiKey]);
+        return;
+      }
+      
+      console.log(`   [${idx}] ✅ Added point: ts=${new Date(ts).toLocaleString()}, ${apiKey}=${val}`);
       points.push({ x: ts, y: scaleNPKValue(val, selectedMetric) });
     });
+
+    console.log(`📊 Total points collected: ${points.length}`);
 
     if (selectedSensor === "all") {
       const grouped = {};
@@ -497,12 +616,16 @@ const Analytics = () => {
         if (!grouped[p.x]) grouped[p.x] = [];
         grouped[p.x].push(p.y);
       });
-      return Object.entries(grouped)
+      const result = Object.entries(grouped)
         .map(([ts, arr]) => ({ x: Number(ts), y: arr.reduce((a, b) => a + b, 0) / arr.length }))
         .sort((a, b) => a.x - b.x);
+      console.log(`📊 After grouping and averaging: ${result.length} points`);
+      return result;
     }
 
-    return points.sort((a, b) => a.x - b.x);
+    const sorted = points.sort((a, b) => a.x - b.x);
+    console.log(`📊 Final trend data: ${sorted.length} points`);
+    return sorted;
   }, [historyByModule, selectedModuleId, selectedSensor, selectedMetric, displayDayStartMs, displayDayEndMs]);
 
   const recordCount = useMemo(() => {
@@ -661,6 +784,37 @@ const Analytics = () => {
             </button>
           </div>
 
+          {/* Node Selector (displays when nodes are available) */}
+          {availableNodes.length > 0 && (
+            <div className="flex items-center gap-2 bg-white border-0 shadow-md rounded-2xl px-3 py-2">
+              <button
+                onClick={() => cycleNode(-1)}
+                disabled={availableNodes.length <= 1}
+                className="w-9 h-9 flex items-center justify-center bg-gray-100 hover:bg-gray-200 active:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed rounded-full transition-all duration-150 active:scale-95"
+                aria-label="Previous node"
+              >
+                <ChevronLeft className="w-4 h-4 text-gray-700" />
+              </button>
+              <div className="min-w-0 px-1">
+                <div className="text-xs text-gray-500 font-medium">Node</div>
+                <div className="text-sm font-bold text-gray-900 truncate" title={selectedNodeId || ""}>
+                  {selectedNodeId || "—"}
+                </div>
+                <div className="text-[11px] text-gray-500">
+                  {availableNodes.length} nodes
+                </div>
+              </div>
+              <button
+                onClick={() => cycleNode(1)}
+                disabled={availableNodes.length <= 1}
+                className="w-9 h-9 flex items-center justify-center bg-gray-100 hover:bg-gray-200 active:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed rounded-full transition-all duration-150 active:scale-95"
+                aria-label="Next node"
+              >
+                <ChevronRight className="w-4 h-4 text-gray-700" />
+              </button>
+            </div>
+          )}
+
           <div className="relative">
             <Select value={selectedSensor} onValueChange={(val) => setSelectedSensor(val)}>
               <SelectTrigger className="w-full sm:w-48 bg-white border-0 shadow-md rounded-2xl px-4 py-3 text-gray-900 font-medium focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50">
@@ -735,6 +889,11 @@ const Analytics = () => {
                   }).toUpperCase()
                 : "—"}
             </span>
+            {displayDayStartMs && (
+              <div className="text-xs text-gray-500 mt-1">
+                Records: {recordCount} | Trend points: {trendData.length}
+              </div>
+            )}
           </div>
 
           <button
