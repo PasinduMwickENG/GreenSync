@@ -24,24 +24,32 @@ const mapRtdbToModules = (farmData) => {
   Object.entries(farmData).forEach(([farmId, farm]) => {
     if (farm.modules) {
       Object.entries(farm.modules).forEach(([moduleId, moduleData]) => {
-        // Check if this module has individual nodes (new structure)
-        const hasNodes = moduleData.nodes && typeof moduleData.nodes === 'object';
-        
+        // latestReading at module level (written by GSM gateway / Apps Script) takes priority.
+        // Only fall back to per-node structure when there is NO module-level latestReading.
+        const hasLatestReading = moduleData.latestReading && typeof moduleData.latestReading === 'object';
+        const hasNodes = !hasLatestReading && moduleData.nodes && typeof moduleData.nodes === 'object';
+
         if (hasNodes) {
           // Create a module entry for each node
           const sensorModules = [];
           Object.entries(moduleData.nodes).forEach(([nodeId, nodeData]) => {
             const temperature = nodeData.temperature ?? 0;
-            const humidity = nodeData.humidity ?? 0;
-            const soilMoisture = nodeData.soilMoisture ?? nodeData.moisture ?? 0;
+            const humidity = nodeData.humidity ?? nodeData.hum ?? 0;
+            const soilMoisture = nodeData.soilMoisture ?? nodeData.moisture ?? nodeData.soil ?? 0;
             const ph = nodeData.ph ?? nodeData.soilPH ?? nodeData.pH ?? 7;
+            const nitrogen = nodeData.nitrogen ?? nodeData.n ?? 0;
+            const phosphorus = nodeData.phosphorus ?? nodeData.p ?? 0;
+            const potassium = nodeData.potassium ?? nodeData.k ?? 0;
+            const soilTemp = nodeData.soilTemp ?? nodeData.soiltem ?? 0;
+            const rssi = nodeData.rssi ?? null;
+            const snr = nodeData.snr ?? null;
 
             sensorModules.push({
               id: `${moduleId}-${nodeId}`,
               name: `${nodeId}`,
               location: moduleData.location || farm.name || 'Unknown',
               lastUpdated: nodeData.timestamp ? new Date(parseTimestampToMs(nodeData.timestamp)).toLocaleString() : 'Never',
-              sensorData: { ...nodeData, temperature, humidity, soilMoisture, ph },
+              sensorData: { ...nodeData, temperature, humidity, soilMoisture, ph, nitrogen, phosphorus, potassium, soilTemp, rssi, snr },
               status: 'active',
               sensors: {
                 temperature: {
@@ -59,10 +67,30 @@ const mapRtdbToModules = (farmData) => {
                   unit: '%',
                   threshold: { min: 20, max: 80 }
                 },
+                soilTemp: {
+                  value: soilTemp,
+                  unit: '°C',
+                  threshold: { min: 10, max: 40 }
+                },
                 soilPH: {
                   value: ph,
                   unit: 'pH',
                   threshold: { min: 5.5, max: 7.5 }
+                },
+                nitrogen: {
+                  value: nitrogen,
+                  unit: 'ppm',
+                  threshold: { min: 0, max: 100 }
+                },
+                phosphorus: {
+                  value: phosphorus,
+                  unit: 'ppm',
+                  threshold: { min: 0, max: 100 }
+                },
+                potassium: {
+                  value: potassium,
+                  unit: 'ppm',
+                  threshold: { min: 0, max: 100 }
                 }
               },
             });
@@ -80,11 +108,17 @@ const mapRtdbToModules = (farmData) => {
           // Fallback to old structure (latestReading or sensors)
           const sensors = moduleData.latestReading || moduleData.sensors || {};
 
-          // Robust sensor mapping
+          // Robust sensor mapping (supports both canonical names and gateway shorthand)
           const temperature = sensors.temperature ?? 0;
-          const humidity = sensors.humidity ?? 0;
-          const soilMoisture = sensors.soilMoisture ?? sensors.moisture ?? 0;
+          const humidity = sensors.humidity ?? sensors.hum ?? 0;
+          const soilMoisture = sensors.soilMoisture ?? sensors.moisture ?? sensors.soil ?? 0;
           const ph = sensors.ph ?? sensors.soilPH ?? sensors.pH ?? 7;
+          const nitrogen = sensors.nitrogen ?? sensors.n ?? 0;
+          const phosphorus = sensors.phosphorus ?? sensors.p ?? 0;
+          const potassium = sensors.potassium ?? sensors.k ?? 0;
+          const soilTemp = sensors.soilTemp ?? sensors.soiltem ?? 0;
+          const rssi = sensors.rssi ?? null;
+          const snr = sensors.snr ?? null;
 
           processedModules.push({
             id: moduleId,
@@ -97,7 +131,7 @@ const mapRtdbToModules = (farmData) => {
               name: `${moduleId} Sensors`,
               location: moduleData.location || 'Unknown',
               lastUpdated: sensors.timestamp ? new Date(parseTimestampToMs(sensors.timestamp)).toLocaleString() : 'Never',
-              sensorData: { ...sensors, temperature, humidity, soilMoisture, ph },
+              sensorData: { ...sensors, temperature, humidity, soilMoisture, ph, nitrogen, phosphorus, potassium, soilTemp, rssi, snr },
               status: 'active',
               sensors: {
                 temperature: {
@@ -115,10 +149,30 @@ const mapRtdbToModules = (farmData) => {
                   unit: '%',
                   threshold: { min: 20, max: 80 }
                 },
+                soilTemp: {
+                  value: soilTemp,
+                  unit: '°C',
+                  threshold: { min: 10, max: 40 }
+                },
                 soilPH: {
                   value: ph,
                   unit: 'pH',
                   threshold: { min: 5.5, max: 7.5 }
+                },
+                nitrogen: {
+                  value: nitrogen,
+                  unit: 'mg/kg',
+                  threshold: { min: 0, max: 100 }
+                },
+                phosphorus: {
+                  value: phosphorus,
+                  unit: 'mg/kg',
+                  threshold: { min: 0, max: 100 }
+                },
+                potassium: {
+                  value: potassium,
+                  unit: 'mg/kg',
+                  threshold: { min: 0, max: 100 }
                 }
               },
             }]
@@ -230,9 +284,13 @@ const LiveSensors = ({ selectedModuleId, onBackToDashboard }) => {
   const getSensorIcon = (sensorType) => {
     switch (sensorType) {
       case 'temperature': return <Thermometer className="w-5 h-5 sm:w-6 sm:h-6" />;
+      case 'soilTemp': return <Thermometer className="w-5 h-5 sm:w-6 sm:h-6" />;
       case 'soilMoisture': return <Droplets className="w-5 h-5 sm:w-6 sm:h-6" />;
       case 'soilPH': return <Zap className="w-5 h-5 sm:w-6 sm:h-6" />;
       case 'lightIntensity': return <Sun className="w-5 h-5 sm:w-6 sm:h-6" />;
+      case 'nitrogen': return <Beaker className="w-5 h-5 sm:w-6 sm:h-6" />;
+      case 'phosphorus': return <Beaker className="w-5 h-5 sm:w-6 sm:h-6" />;
+      case 'potassium': return <Beaker className="w-5 h-5 sm:w-6 sm:h-6" />;
       default: return <Activity className="w-5 h-5 sm:w-6 sm:h-6" />;
     }
   };
@@ -500,6 +558,22 @@ const LiveSensors = ({ selectedModuleId, onBackToDashboard }) => {
                           <ChevronRight className="w-4 h-4" />
                         </button>
                       </div>
+                    </div>
+                  )}
+
+                  {/* Signal Quality (RSSI / SNR) */}
+                  {currentSensorModule?.sensorData?.rssi != null && (
+                    <div className="flex flex-wrap gap-3 px-1">
+                      <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-full text-xs font-semibold text-blue-700">
+                        <Activity className="w-3.5 h-3.5" />
+                        <span>RSSI: {currentSensorModule.sensorData.rssi} dBm</span>
+                      </div>
+                      {currentSensorModule.sensorData.snr != null && (
+                        <div className="flex items-center gap-2 px-3 py-1.5 bg-purple-50 border border-purple-200 rounded-full text-xs font-semibold text-purple-700">
+                          <Activity className="w-3.5 h-3.5" />
+                          <span>SNR: {currentSensorModule.sensorData.snr} dB</span>
+                        </div>
+                      )}
                     </div>
                   )}
 

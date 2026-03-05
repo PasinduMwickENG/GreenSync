@@ -14,6 +14,7 @@ import { ref, onValue } from 'firebase/database';
 // ✅ Default threshold values for each sensor parameter
 const defaultThresholds = {
   temperature: { lower: 20, upper: 35 },
+  soilTemp: { lower: 10, upper: 40 },
   moisture: { lower: 30, upper: 70 },
   pH: { lower: 5.5, upper: 7.5 },
   nitrogen: { lower: 0.5, upper: 2.0 },
@@ -35,8 +36,27 @@ function Module() {
   const [showPanel, setShowPanel] = useState(false);
   const [thresholds, setThresholds] = useState(defaultThresholds); // ✅ Initialize with defaults
 
+  // Normalize raw RTDB record to consistent field names.
+  // The GSM gateway sends shorthand keys (hum, soil, soiltem, n, p, k, ph, temp);
+  // older paths use long-form names. We support both here.
+  const normalizeRecord = (rec) => {
+    if (!rec || typeof rec !== 'object') return rec;
+    return {
+      ...rec,
+      temperature: rec.temperature ?? rec.temp ?? 0,
+      moisture: rec.moisture ?? rec.soilMoisture ?? rec.soil ?? 0,
+      pH: rec.pH ?? rec.soilPH ?? rec.ph ?? 7,
+      nitrogen: rec.nitrogen ?? rec.n ?? 0,
+      phosphorus: rec.phosphorus ?? rec.p ?? 0,
+      potassium: rec.potassium ?? rec.k ?? 0,
+      soilTemp: rec.soilTemp ?? rec.soiltem ?? 0,
+      humidity: rec.humidity ?? rec.hum ?? 0,
+    };
+  };
+
   const applyLatestNow = (latestReading) => {
-    const records = latestReading && typeof latestReading === 'object' ? [latestReading] : [];
+    const raw = latestReading && typeof latestReading === 'object' ? latestReading : null;
+    const records = raw ? [normalizeRecord(raw)] : [];
     setSensorData(records);
     const sensorIds = records.length
       ? [...new Set(records.map((e) => e.sensor_id || 'unknown_sensor'))]
@@ -88,6 +108,7 @@ function Module() {
       nitrogen: latestEntry.nitrogen,
       phosphorus: latestEntry.phosphorus,
       potassium: latestEntry.potassium,
+      soilTemp: latestEntry.soilTemp,
     };
 
     Object.entries(alerts).forEach(([key, value]) => {
@@ -179,21 +200,25 @@ function Module() {
           <div className="flex flex-wrap justify-center gap-5 mt-10">
             {[
               { reading: 'Temperature', value: `${latest.temperature}°C`, sensorType: 'temperature' },
+              { reading: 'Soil Temp', value: `${latest.soilTemp}°C`, sensorType: 'soilTemp' },
               { reading: 'Moisture', value: `${latest.moisture}%`, sensorType: 'moisture' },
               { reading: 'pH', value: latest.pH, sensorType: 'pH' },
               { reading: 'Nitrogen', value: `${latest.nitrogen} mg/kg`, sensorType: 'nitrogen' },
               { reading: 'Phosphorus', value: `${latest.phosphorus} mg/kg`, sensorType: 'phosphorus' },
               { reading: 'Potassium', value: `${latest.potassium} mg/kg`, sensorType: 'potassium' },
+              ...(latest.rssi != null ? [{ reading: 'Signal (RSSI)', value: `${latest.rssi} dBm`, sensorType: null }] : []),
             ].map((card, idx) => (
               <div key={idx} className="flex flex-col items-center gap-2 p-4 bg-gray-50 rounded-lg">
                 <Card card={card} />
-                <Counter
-                  title={card.reading}
-                  moduleId={moduleId}
-                  sensorType={card.sensorType}
-                  initialThresholds={thresholds[card.sensorType]}
-                  onThresholdChange={handleThresholdChange}
-                />
+                {card.sensorType && (
+                  <Counter
+                    title={card.reading}
+                    moduleId={moduleId}
+                    sensorType={card.sensorType}
+                    initialThresholds={thresholds[card.sensorType]}
+                    onThresholdChange={handleThresholdChange}
+                  />
+                )}
               </div>
             ))}
           </div>

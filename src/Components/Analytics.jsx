@@ -11,14 +11,15 @@ import "./Loader.css";
 /* --- Helpers --- */
 const metricToApiKey = {
   temperature: "temperature",
-  soilMoisture: "moisture",
-  soilPH: "pH",
+  soilMoisture: "soilMoisture",
+  soilTemp: "soilTemp",
+  soilPH: "ph",
   nitrogen: "nitrogen",
   phosphorus: "phosphorus",
   potassium: "potassium",
 };
 
-const metrics = ["temperature", "soilMoisture", "soilPH", "nitrogen", "phosphorus", "potassium"];
+const metrics = ["temperature", "soilMoisture", "soilTemp", "soilPH", "nitrogen", "phosphorus", "potassium"];
 
 // scale values. for exhibition purpose only. remove later
 const scaleNPKValue = (value, metric) => {
@@ -485,9 +486,15 @@ const Analytics = () => {
   }, [user, selectedModuleId, selectedNodeId, availableNodes, moduleIndex, refreshToken, dayCursorMs]);
 
   // When module changes, reset day cursor so it snaps to the module's latest day
+  // When module changes, reset day cursor so it snaps to the module's latest day
   useEffect(() => {
-    setDayCursorMs(null);
-  }, [selectedModuleId]);
+    const latestMs = historyByModule?.[selectedModuleId]?.lastReceivedMs;
+    if (latestMs) {
+      setDayCursorMs(startOfDayMs(latestMs));
+    } else {
+      setDayCursorMs(null);
+    }
+  }, [selectedModuleId, historyByModule]);
 
   const displayDayStartMs = useMemo(() => {
     if (dayCursorMs != null) return dayCursorMs;
@@ -637,6 +644,29 @@ const Analytics = () => {
 
   const hasTrendPoints = trendData.length > 0;
 
+  // Calculate range for latest 10 readings
+  const latest10Range = useMemo(() => {
+    if (trendData.length === 0) return null;
+    
+    // Sort by timestamp and take last 10 points
+    const sortedData = [...trendData].sort((a, b) => a.x - b.x);
+    const latest10 = sortedData.slice(-10);
+    
+    if (latest10.length < 2) return null;
+    
+    const minX = latest10[0].x;
+    const maxX = latest10[latest10.length - 1].x;
+    
+    // Add small padding (5% on each side)
+    const range = maxX - minX;
+    const padding = range * 0.05;
+    
+    return {
+      min: Math.max(minX - padding, displayDayStartMs || 0),
+      max: Math.min(maxX + padding, displayDayEndMs || Date.now())
+    };
+  }, [trendData, displayDayStartMs, displayDayEndMs]);
+
   const selectedPlotName = selectedPlot?.name || (selectedPlotId || "—");
 
   const chartOptions = {
@@ -683,11 +713,17 @@ const Analytics = () => {
           };
         },
       },
+      responsive: [{
+        breakpoint: 600,
+        options: {
+          chart: { width: '100%' },
+        },
+      }],
     },
     xaxis: {
       type: "datetime",
-      min: savedZoom?.xMin ?? (displayDayStartMs ?? undefined),
-      max: savedZoom?.xMax ?? (displayDayEndMs ?? undefined),
+      min: savedZoom?.xMin ?? latest10Range?.min ?? (displayDayStartMs ?? undefined),
+      max: savedZoom?.xMax ?? latest10Range?.max ?? (displayDayEndMs ?? undefined),
       labels: { datetimeUTC: false, rotate: -45 },
       tooltip: { enabled: false },
     },

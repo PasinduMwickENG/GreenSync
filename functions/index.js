@@ -234,13 +234,54 @@ exports.ingestReading = functions.https.onRequest(async (req, res) => {
     const providedKey = String(body.ingestKey || body.apiKey || req.get('x-ingest-key') || '').trim();
 
     const moduleSnap = await db.ref(`modules/${moduleId}`).get();
-    if (!moduleSnap.exists()) return res.status(404).json({ success: false, error: 'Unknown moduleId' });
-    const moduleData = moduleSnap.val() || {};
 
-    const assignedTo = moduleData.assignedTo;
-    const farmId = moduleData.farmId;
+    // Body may carry routing overrides (required when module isn't registered yet)
+    const bodyUserId = String(body.assignedTo || body.userId || '').trim();
+    const bodyFarmId = String(body.farmId    || '').trim();
+
+    // Auto-register module if it doesn't exist yet but routing info was provided
+    if (!moduleSnap.exists()) {
+      if (!bodyUserId || !bodyFarmId) {
+        return res.status(404).json({
+          success: false,
+          error: 'Unknown moduleId. Include userId and farmId in the payload to auto-register.'
+        });
+      }
+      const now = Date.now();
+      await db.ref('/').update({
+        [`modules/${moduleId}/status`]:       'assigned',
+        [`modules/${moduleId}/assignedTo`]:   bodyUserId,
+        [`modules/${moduleId}/farmId`]:       bodyFarmId,
+        [`modules/${moduleId}/registeredAt`]: now,
+        [`modules/${moduleId}/deviceType`]:   'ESP32-Gateway',
+        [`modules/${moduleId}/firmwareVersion`]: 'gsm-1.0',
+        [`users/${bodyUserId}/farms/${bodyFarmId}/modules/${moduleId}/createdAt`]: now,
+      });
+    }
+
+    // Re-read after possible auto-registration
+    const moduleData = moduleSnap.exists() ? (moduleSnap.val() || {}) : {};
+
+    // Accept routing from RTDB first, then fall back to payload values
+    const assignedTo = (moduleData.assignedTo || bodyUserId).trim();
+    const farmId     = (moduleData.farmId     || bodyFarmId).trim();
     if (!assignedTo || !farmId) {
-      return res.status(409).json({ success: false, error: 'Module is not assigned to a user/plot yet' });
+      return res.status(409).json({
+        success: false,
+        error: 'Module is not assigned to a user/plot yet. Include userId and farmId in the payload.'
+      });
+    }
+
+    // If module existed but was unassigned, update it now using the provided values
+    if (moduleSnap.exists() && (!moduleData.assignedTo || !moduleData.farmId)) {
+      const now = Date.now();
+      await db.ref('/').update({
+        [`modules/${moduleId}/status`]:             'assigned',
+        [`modules/${moduleId}/assignedTo`]:         assignedTo,
+        [`modules/${moduleId}/farmId`]:             farmId,
+        [`modules/${moduleId}/lastRegisteredAt`]:   now,
+        [`users/${assignedTo}/farms/${farmId}/modules/${moduleId}/createdAt`]: now,
+      });
     }
 
     const requiredKey = String(moduleData.ingestKey || moduleData.apiKey || '').trim();

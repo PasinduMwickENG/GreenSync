@@ -63,8 +63,9 @@ const AddModuleDialog = ({ isOpen, onClose, userId, farms, onModuleAdded, initia
                 });
             }
 
-            // Create entries in both places
-            await set(ref(rtdb, `modules/${moduleId}`), {
+            // Update module registry — use update() so deviceType/registeredAt set by
+            // the device's first boot are preserved
+            await update(ref(rtdb, `modules/${moduleId}`), {
                 assignedTo: userId,
                 status: 'assigned',
                 farmId: defaultFarmId,
